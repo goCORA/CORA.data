@@ -1,0 +1,89 @@
+using System.IO.Compression;
+using CORA.Data.Backup;
+using CORA.Data.Email;
+using CORA.Core.Security;
+
+namespace CORA.Data.Tests.Backup;
+
+public class DatabaseBackupServiceTests : IDisposable
+{
+   private static readonly string[] AllStoreFiles =
+   [
+      "tags.litedb", "mailsync.litedb", "accounts.litedb", "contacts.litedb",
+      "trustedImageSenders.litedb", "blacklist.litedb", "ai_autonomy.litedb",
+   ];
+
+   private readonly string _dir = Path.Combine(Path.GetTempPath(), "cora-tests-" + Guid.NewGuid().ToString("N"));
+   private readonly DatabaseBackupService _service;
+
+   public DatabaseBackupServiceTests()
+   {
+      Directory.CreateDirectory(_dir);
+      _service = new DatabaseBackupService(new TempAppData(_dir), new NoKeyStorage());
+   }
+
+   public void Dispose()
+   {
+      try { Directory.Delete(_dir, recursive: true); } catch (IOException) { }
+   }
+
+   private sealed class TempAppData(string dir) : IAppDataLocation
+   {
+      public string AppDataDirectory { get; } = dir;
+   }
+
+   private sealed class NoKeyStorage : ISecureKeyStorage
+   {
+      public Task<string?> GetAsync(string key) => Task.FromResult<string?>(null);
+      public Task SetAsync(string key, string value) => Task.CompletedTask;
+      public Task RemoveAsync(string key) => Task.CompletedTask;
+   }
+
+   private void WriteAllStoreFiles(string content)
+   {
+      foreach (var name in AllStoreFiles)
+         File.WriteAllText(Path.Combine(_dir, name), $"{content}:{name}");
+   }
+
+   private MemoryStream BackupOfCurrentFiles()
+   {
+      var stream = new MemoryStream();
+      _service.CreateBackupArchive(stream);
+      stream.Position = 0;
+      return stream;
+   }
+
+   [Fact]
+   public void CreateBackupArchive_IncludesEveryStoreFile_IncludingBlacklistAndAiAutonomy()
+   {
+      WriteAllStoreFiles("original");
+
+      using var backup = BackupOfCurrentFiles();
+
+      using var zip = new ZipArchive(backup, ZipArchiveMode.Read);
+      Assert.Equal(AllStoreFiles.Order(), zip.Entries.Select(e => e.FullName).Order());
+   }
+
+   [Theory]
+   [InlineData(true, false, "blacklist.litedb")]
+   [InlineData(false, true, "ai_autonomy.litedb")]
+   [InlineData(true, true, "blacklist.litedb", "ai_autonomy.litedb")]
+   [InlineData(false, false)]
+   public void RestoreBackupArchive_RestoresOnlyTheSelectedStores(bool blacklist, bool aiAutonomy, params string[] expectedRestored)
+   {
+      WriteAllStoreFiles("original");
+      using var backup = BackupOfCurrentFiles();
+      WriteAllStoreFiles("changed-since-backup");
+
+      _service.RestoreBackupArchive(
+         backup, restoreAccounts: false, restoreTags: false, restoreContacts: false,
+         restoreMailboxes: false, restoreTrustedImageSenders: false,
+         restoreBlacklist: blacklist, restoreAiAutonomy: aiAutonomy);
+
+      foreach (var name in AllStoreFiles)
+      {
+         var expected = expectedRestored.Contains(name) ? "original" : "changed-since-backup";
+         Assert.Equal($"{expected}:{name}", File.ReadAllText(Path.Combine(_dir, name)));
+      }
+   }
+}

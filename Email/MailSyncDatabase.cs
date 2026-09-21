@@ -1,0 +1,682 @@
+using CORA.Core.Security;
+using LiteDB;
+
+namespace CORA.Data.Email;
+
+/// <summary>
+/// LiteDB-backed <see cref="IMailSyncStore"/> implementation, following the same
+/// pattern as <see cref="ContactDatabase"/>. Tracks POP3 message UIDLs per account
+/// and folder so that subsequent syncs only download headers for new messages,
+/// and remembers local read state (POP3 has no server-side flags).
+/// Singleton — the database file/collections are created on first use. The backing
+/// file is encrypted at rest via <see cref="EncryptedLiteDbFile"/>.
+/// </summary>
+public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
+{
+    private readonly EncryptedLiteDbFile _file;
+    private readonly ILiteCollection<MailSummaryDoc> _summaries;
+    private readonly ILiteCollection<DeletedUidlDoc> _deletedUidls;
+    private readonly ILiteCollection<MessageBodyDoc> _bodies;
+    private readonly ILiteCollection<FolderInfoDoc> _folders;
+    private readonly string _attachmentsRoot;
+    // Tracks (accountKey, folder) pairs already checked for duplicate uids this process,
+    // so the full-collection repair scan runs at most once per folder per app run instead
+    // of on every message load (GetMessagesAsync/GetCachedSummariesAsync are called far
+    // more often than a repair could ever be needed). ConcurrentDictionary since repairs
+    // can be triggered concurrently from GetMessagesAsync and SyncFolderAsync.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _repairedFolders = new(StringComparer.OrdinalIgnoreCase);
+
+    public MailSyncDatabase(string path, string attachmentsRoot)
+    {
+        _file = EncryptedLiteDbFile.Open(path);
+
+        _summaries = _file.Database.GetCollection<MailSummaryDoc>("MailSummaries");
+        _summaries.EnsureIndex(s => s.AccountKey);
+        _summaries.EnsureIndex(s => s.FolderName);
+
+        _deletedUidls = _file.Database.GetCollection<DeletedUidlDoc>("DeletedUidls");
+        _deletedUidls.EnsureIndex(d => d.AccountKey);
+
+        _bodies = _file.Database.GetCollection<MessageBodyDoc>("MessageBodies");
+        _bodies.EnsureIndex(b => b.AccountKey);
+
+        _folders = _file.Database.GetCollection<FolderInfoDoc>("FolderInfos");
+        _folders.EnsureIndex(f => f.AccountKey);
+
+        _attachmentsRoot = attachmentsRoot;
+        Directory.CreateDirectory(_attachmentsRoot);
+    }
+
+    public void Dispose() => _file.Dispose();
+
+    void IFlushableStore.Flush() => _file.Flush();
+    void IFlushableStore.SuppressFlush() => _file.SuppressFlush();
+
+    private static string MakeKey(string accountKey, string folderFullName, string uidl) =>
+        string.Join("|", accountKey, folderFullName, uidl);
+
+    /// <summary>
+    /// Repairs Trash rows written by an older, buggy version of <see cref="MoveToTrashAsync"/>
+    /// that cleared Uidl to string.Empty instead of keeping it in sync with the row's id.
+    /// The id was still built as "accountKey|folder|&lt;guid&gt;" at move time, so the guid can
+    /// be recovered from the id itself and written back as the row's Uidl. No-ops for rows
+    /// that already have a Uidl.
+    /// </summary>
+    private string RepairUidlIfEmpty(MailSummaryDoc doc)
+    {
+        if (!string.IsNullOrEmpty(doc.Uidl))
+            return doc.Uidl;
+
+        var idx = doc.Id.LastIndexOf('|');
+        if (idx < 0 || idx == doc.Id.Length - 1)
+            return doc.Uidl;
+
+        var recovered = doc.Id[(idx + 1)..];
+        if (string.IsNullOrEmpty(recovered))
+            return doc.Uidl;
+
+        doc.Uidl = recovered;
+        _summaries.Update(doc);
+
+        // The body row shares the same id, so its Uidl needs the same repair for consistency
+        // (GetBodyAsync itself only needs the id, but keep the field truthful).
+        var bodyDoc = _bodies.FindById(doc.Id);
+        if (bodyDoc is not null && string.IsNullOrEmpty(bodyDoc.Uidl))
+        {
+            bodyDoc.Uidl = recovered;
+            _bodies.Update(bodyDoc);
+        }
+
+        return recovered;
+    }
+
+    public Task<HashSet<string>> GetKnownUidlsAsync(
+        string accountKey, string folderFullName, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            var result = new HashSet<string>();
+
+            foreach (var s in _summaries.Find(s => s.AccountKey == accountKey && s.FolderName == folderFullName))
+                result.Add(s.Uidl);
+
+            foreach (var d in _deletedUidls.Find(d => d.AccountKey == accountKey && d.FolderName == folderFullName))
+                result.Add(d.Uidl);
+
+            return result;
+        }, cancellationToken);
+
+    public Task<HashSet<string>> GetUidlsMissingBodyAsync(
+        string accountKey, string folderFullName, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            var summaryUidls = _summaries
+                .Find(s => s.AccountKey == accountKey && s.FolderName == folderFullName)
+                .Select(s => s.Uidl)
+                .ToHashSet();
+
+            var bodyUidls = _bodies
+                .Find(b => b.AccountKey == accountKey && b.FolderName == folderFullName)
+                .Select(b => b.Uidl)
+                .ToHashSet();
+
+            summaryUidls.ExceptWith(bodyUidls);
+            return summaryUidls;
+        }, cancellationToken);
+
+    public Task UpsertAsync(
+        string accountKey, string folderFullName, IEnumerable<StoredMailSummary> summaries,
+        CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            foreach (var summary in summaries)
+            {
+                var id = MakeKey(accountKey, folderFullName, summary.Uidl);
+                var existing = _summaries.FindById(id);
+                var isRead = existing?.IsRead ?? summary.IsRead;
+                var isImportant = existing?.IsImportant ?? summary.IsImportant;
+
+                _summaries.Upsert(new MailSummaryDoc
+                {
+                    Id = id,
+                    AccountKey = accountKey,
+                    FolderName = folderFullName,
+                    Uidl = summary.Uidl,
+                    Uid = summary.Uid,
+                    From = summary.From,
+                    Subject = summary.Subject,
+                    Date = summary.Date,
+                    IsRead = isRead,
+                    HasAttachments = summary.HasAttachments,
+                    IsLocalOnly = existing?.IsLocalOnly ?? summary.IsLocalOnly,
+                    IsImportant = isImportant,
+
+                    // Prefer freshly-captured headers, but never let a summary that lacks them
+                    // wipe values already stored - that keeps a later backfill idempotent and
+                    // protects rows whose headers were captured by a different code path.
+                    MessageId = Coalesce(summary.MessageId, existing?.MessageId),
+                    InReplyTo = Coalesce(summary.InReplyTo, existing?.InReplyTo),
+                    References = Coalesce(summary.References, existing?.References),
+                });
+            }
+        }, cancellationToken);
+
+    public Task<List<StoredMailSummary>> GetCachedSummariesAsync(
+        string accountKey, string folderFullName, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            var docs = _summaries
+                .Find(s => s.AccountKey == accountKey && s.FolderName == folderFullName)
+                .OrderByDescending(s => s.Date)
+                .ToList();
+
+            // Trash rows written before MoveToTrashAsync started reassigning Uid can still
+            // carry the Uid they had in their original folder, which may collide with another
+            // message moved there from a different folder/position. Since Uid is the only key
+            // used to address a message within a folder elsewhere in the app, a collision means
+            // acting on one Trash message (e.g. permanent delete) can silently affect the wrong
+            // one instead. Repair any duplicates found on read by reassigning fresh Uids.
+            // Only do this once per folder per process: it's a full-collection scan+rewrite,
+            // and once repaired a folder cannot develop new duplicates just by being read.
+            if (string.Equals(folderFullName, "Trash", StringComparison.OrdinalIgnoreCase)
+                && _repairedFolders.TryAdd(MakeKey(accountKey, folderFullName, "__trash-dupe-check__"), 0))
+                RepairDuplicateUids(accountKey, folderFullName, docs);
+
+            return docs
+                .Select(s => new StoredMailSummary
+                {
+                    Uidl = RepairUidlIfEmpty(s),
+                    Uid = s.Uid,
+                    From = s.From,
+                    Subject = s.Subject,
+                    Date = s.Date,
+                    IsRead = s.IsRead,
+                    HasAttachments = s.HasAttachments,
+                    IsLocalOnly = s.IsLocalOnly,
+                    IsImportant = s.IsImportant,
+                    MessageId = s.MessageId ?? string.Empty,
+                    InReplyTo = s.InReplyTo ?? string.Empty,
+                    References = s.References ?? string.Empty,
+                })
+                .ToList();
+        }, cancellationToken);
+
+    /// <summary>
+    /// Returns <paramref name="incoming"/> when it has a value, otherwise falls back to what is
+    /// already stored. Used for threading headers so a sync path that does not capture them
+    /// leaves existing values intact instead of blanking them.
+    /// </summary>
+    private static string Coalesce(string? incoming, string? existing) =>
+        !string.IsNullOrWhiteSpace(incoming) ? incoming
+        : !string.IsNullOrWhiteSpace(existing) ? existing
+        : string.Empty;
+
+    /// <summary>Reassigns a fresh, unique Uid to every summary after the first found with a given Uid.</summary>
+    private void RepairDuplicateUids(string accountKey, string folderFullName, List<MailSummaryDoc> docs)
+    {
+        var seenUids = new HashSet<uint>();
+        foreach (var doc in docs)
+        {
+            if (seenUids.Add(doc.Uid))
+                continue;
+
+            doc.Uid = NextUid(accountKey, folderFullName);
+            seenUids.Add(doc.Uid);
+            _summaries.Update(doc);
+        }
+    }
+
+    /// <summary>
+    /// POP3-only maintenance: repairs a folder whose summaries have colliding uids, e.g. from
+    /// before uids were reserved uniquely (see <see cref="ReserveUidAsync"/>) instead of being
+    /// derived from a positional server index that could clash with an already-cached message.
+    /// Callers must only invoke this for POP3 accounts/folders — IMAP uids are the server's own
+    /// stable identifiers and must never be reassigned.
+    /// </summary>
+    public Task RepairDuplicateUidsAsync(
+        string accountKey, string folderFullName, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            // This is a full-collection scan; once a folder has been checked in this process
+            // it cannot develop new uid duplicates just from normal reads/syncs, so skip repeat
+            // scans on every message load/sync to avoid unnecessary LiteDB work.
+            if (!_repairedFolders.TryAdd(MakeKey(accountKey, folderFullName, "__dupe-check__"), 0))
+                return;
+
+            var docs = _summaries.Find(s => s.AccountKey == accountKey && s.FolderName == folderFullName).ToList();
+            RepairDuplicateUids(accountKey, folderFullName, docs);
+        }, cancellationToken);
+
+    public Task SetReadStateAsync(
+        string accountKey, string folderFullName, string uidl, bool isRead,
+        CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            // Try the fast primary-key lookup first, then fall back to a field query
+            // so a key-construction mismatch never silently leaves the entry unchanged.
+            var id = MakeKey(accountKey, folderFullName, uidl);
+            var doc = _summaries.FindById(id)
+                   ?? _summaries.FindOne(s =>
+                          s.AccountKey == accountKey &&
+                          s.FolderName == folderFullName &&
+                          s.Uidl == uidl);
+
+            if (doc is null)
+            {
+                // Fall back to matching by uid (numeric) in case the uidl string format
+                // differs between sync and update (e.g. IMAP uid stored as "123" vs uint).
+                if (uint.TryParse(uidl, out var numericUid))
+                    doc = _summaries.FindOne(s =>
+                              s.AccountKey == accountKey &&
+                              s.FolderName == folderFullName &&
+                              s.Uid == numericUid);
+            }
+
+            if (doc is null)
+                return;
+
+            doc.IsRead = isRead;
+            _summaries.Update(doc);
+        }, cancellationToken);
+
+    public Task SetImportantAsync(
+        string accountKey, string folderFullName, string uidl, bool isImportant,
+        CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            var id = MakeKey(accountKey, folderFullName, uidl);
+            var doc = _summaries.FindById(id)
+                   ?? _summaries.FindOne(s =>
+                          s.AccountKey == accountKey &&
+                          s.FolderName == folderFullName &&
+                          s.Uidl == uidl);
+
+            if (doc is null)
+            {
+                if (uint.TryParse(uidl, out var numericUid))
+                    doc = _summaries.FindOne(s =>
+                              s.AccountKey == accountKey &&
+                              s.FolderName == folderFullName &&
+                              s.Uid == numericUid);
+            }
+
+            if (doc is null)
+                return;
+
+            doc.IsImportant = isImportant;
+            _summaries.Update(doc);
+        }, cancellationToken);
+
+    public Task<string?> GetUidlForUidAsync(
+        string accountKey, string folderFullName, uint uid, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+            _summaries
+                .Find(s => s.AccountKey == accountKey && s.FolderName == folderFullName && s.Uid == uid)
+                .Select(s => (string?)RepairUidlIfEmpty(s))
+                .FirstOrDefault(), cancellationToken);
+
+    public Task DeleteAsync(
+        string accountKey, string folderFullName, string uidl, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            var id = MakeKey(accountKey, folderFullName, uidl);
+
+            var body = _bodies.FindById(id);
+            var cachePaths = body?.Attachments.Select(a => a.CachePath).Where(p => !string.IsNullOrEmpty(p)).ToList()
+                              ?? [];
+
+            _summaries.Delete(id);
+            _bodies.Delete(id);
+
+            _deletedUidls.Upsert(new DeletedUidlDoc
+            {
+                Id = id,
+                AccountKey = accountKey,
+                FolderName = folderFullName,
+                Uidl = uidl,
+            });
+
+            foreach (var path in cachePaths)
+            {
+                try
+                {
+                    if (File.Exists(path))
+                        File.Delete(path);
+                }
+                catch
+                {
+                    // Best-effort cleanup; a stray cache file is not worth failing the delete over.
+                }
+            }
+        }, cancellationToken);
+
+    public Task MoveLocalMessageAsync(
+        string accountKey, string sourceFolderFullName, string destinationFolderFullName, string uidl,
+        CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            var sourceId = MakeKey(accountKey, sourceFolderFullName, uidl);
+            var destId = MakeKey(accountKey, destinationFolderFullName, uidl);
+
+            var summary = _summaries.FindById(sourceId);
+            if (summary is not null)
+            {
+                _summaries.Delete(sourceId);
+                summary.Id = destId;
+                summary.FolderName = destinationFolderFullName;
+                // Assign a fresh Uid that is unique within the destination folder so
+                // the moved message can be addressed/read correctly from there.
+                summary.Uid = NextUid(accountKey, destinationFolderFullName);
+                // Mark this row as locally-moved (not synced from the server), so a
+                // subsequent server sync of the destination folder never treats its
+                // (possibly non-server) Uidl as an orphan and moves it straight back
+                // to Trash - see SyncFolderAsync's orphan-pruning in MailKitEmailService.
+                summary.IsLocalOnly = true;
+                _summaries.Upsert(summary);
+            }
+
+            var body = _bodies.FindById(sourceId);
+            if (body is not null)
+            {
+                _bodies.Delete(sourceId);
+                body.Id = destId;
+                body.FolderName = destinationFolderFullName;
+                _bodies.Upsert(body);
+            }
+
+            // Record a tombstone in the source folder so a background sync of that folder
+            // never re-adds the message we just moved away from it.
+            _deletedUidls.Upsert(new DeletedUidlDoc
+            {
+                Id = sourceId,
+                AccountKey = accountKey,
+                FolderName = sourceFolderFullName,
+                Uidl = uidl,
+            });
+        }, cancellationToken);
+
+    // Tracks the highest Uid handed out so far per (accountKey, folderFullName) this
+    // process, seeded lazily from the DB's current max on first use. NextUid must not
+    // rely solely on querying _summaries for the current max: callers (e.g. SyncFolderAsync)
+    // reserve a uid for each new message *before* the whole batch is upserted at the end of
+    // the sync loop, so every reservation within the same sync would otherwise see the same
+    // stale DB max and hand out the same (colliding) uid to every new message in the batch.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, uint> _uidCounters = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Returns a Uid guaranteed not to already be in use by any summary in the given account/folder.</summary>
+    private uint NextUid(string accountKey, string folderFullName)
+    {
+        var counterKey = MakeKey(accountKey, folderFullName, "__uid-counter__");
+        return _uidCounters.AddOrUpdate(
+            counterKey,
+            _ => SeedUidCounter(accountKey, folderFullName) + 1,
+            (_, current) => current + 1);
+    }
+
+    private uint SeedUidCounter(string accountKey, string folderFullName)
+    {
+        var maxUid = _summaries
+            .Find(s => s.AccountKey == accountKey && s.FolderName == folderFullName)
+            .Select(s => (uint?)s.Uid)
+            .Max();
+        return maxUid ?? 0;
+    }
+
+    public Task<uint> ReserveUidAsync(
+        string accountKey, string folderFullName, CancellationToken cancellationToken = default) =>
+        Task.Run(() => NextUid(accountKey, folderFullName), cancellationToken);
+
+    public Task MoveToTrashAsync(
+        string accountKey, string sourceFolderFullName, string uidl, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            MoveToTrashCore(accountKey, sourceFolderFullName, uidl);
+        }, cancellationToken);
+
+    private void MoveToTrashCore(string accountKey, string sourceFolderFullName, string uidl)
+    {
+            const string trashFolder = "Trash";
+            var sourceId = MakeKey(accountKey, sourceFolderFullName, uidl);
+
+            // A message moved into Trash has no reliable server UIDL any more (it may have
+            // already been removed from the server, or be an orphaned local copy), so key
+            // the Trash copy on a freshly generated id instead. The generated id is also
+            // stored back as the Uidl so later lookups (which resolve uid -> Uidl -> body id)
+            // can still find the body; clearing it to string.Empty would make the summary and
+            // body ids disagree and the message would fail to load from cache.
+            var trashUidl = Guid.NewGuid().ToString("N");
+            var trashId = MakeKey(accountKey, trashFolder, trashUidl);
+
+            var summary = _summaries.FindById(sourceId);
+            if (summary is not null)
+            {
+                _summaries.Delete(sourceId);
+                summary.Id = trashId;
+                summary.FolderName = trashFolder;
+                summary.Uidl = trashUidl;
+
+                // The Uid a message had in its source folder (a POP3 positional index) has
+                // no meaning in Trash and can collide with another message moved there from a
+                // different source folder/position. Since Uid is the only key the rest of the
+                // app (GetUidlForUidAsync, SetReadStateAsync, DeleteAsync, ...) uses to address
+                // a message within a folder, a collision means an action on one Trash message
+                // (e.g. permanent delete) can silently resolve to and affect a different one.
+                // Reassign a Uid that is guaranteed unique within Trash for this account.
+                summary.Uid = NextUid(accountKey, trashFolder);
+                _summaries.Upsert(summary);
+            }
+
+            var body = _bodies.FindById(sourceId);
+            if (body is not null)
+            {
+                _bodies.Delete(sourceId);
+                body.Id = trashId;
+                body.FolderName = trashFolder;
+                body.Uidl = trashUidl;
+                _bodies.Upsert(body);
+            }
+
+            // Record a tombstone in the source folder so a background sync of that folder
+            // never re-adds the message we just moved away from it.
+            _deletedUidls.Upsert(new DeletedUidlDoc
+            {
+                Id = sourceId,
+                AccountKey = accountKey,
+                FolderName = sourceFolderFullName,
+                Uidl = uidl,
+            });
+    }
+
+    public Task UpsertBodyAsync(
+        string accountKey, string folderFullName, string uidl, StoredMailBody body,
+        CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            var id = MakeKey(accountKey, folderFullName, uidl);
+            _bodies.Upsert(new MessageBodyDoc
+            {
+                Id = id,
+                AccountKey = accountKey,
+                FolderName = folderFullName,
+                Uidl = uidl,
+                To = body.To,
+                TextBody = body.TextBody,
+                HtmlBody = body.HtmlBody,
+                Attachments = body.Attachments,
+            });
+        }, cancellationToken);
+
+    public Task<StoredMailBody?> GetBodyAsync(
+        string accountKey, string folderFullName, string uidl, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            var id = MakeKey(accountKey, folderFullName, uidl);
+            var doc = _bodies.FindById(id);
+            if (doc is null)
+                return null;
+
+            return new StoredMailBody
+            {
+                To = doc.To,
+                TextBody = doc.TextBody,
+                HtmlBody = doc.HtmlBody,
+                Attachments = doc.Attachments,
+            };
+        }, cancellationToken);
+
+    public async Task<string> SaveAttachmentAsync(
+        string accountKey, string folderFullName, string uidl, string partSpecifier, string fileName,
+        Stream content, CancellationToken cancellationToken = default)
+    {
+        var safeAccount = MakeSafeSegment(accountKey);
+        var safeFolder = MakeSafeSegment(folderFullName);
+        var safeUidl = MakeSafeSegment(uidl);
+        var safePart = MakeSafeSegment(partSpecifier);
+        var safeFileName = string.IsNullOrWhiteSpace(fileName) ? "attachment" : MakeSafeSegment(fileName);
+
+        var dir = Path.Combine(_attachmentsRoot, safeAccount, safeFolder, safeUidl);
+        Directory.CreateDirectory(dir);
+
+        // Attempt to create the target file. If the file is currently locked by an
+        // external process (e.g. a PDF viewer holding the file open), creating a
+        // file with the same name will fail. To avoid hard failures that surface as
+        // "Could not load messages" to the user, fall back to a unique filename
+        // (appending a GUID) when a create collision/lock occurs.
+        var basePath = Path.Combine(dir, $"{safePart}_{safeFileName}");
+        var path = basePath;
+        for (int attempt = 0; attempt < 4; attempt++)
+        {
+            try
+            {
+                await using (var file = File.Create(path))
+                {
+                    await content.CopyToAsync(file, cancellationToken);
+                }
+
+                // Success
+                return path;
+            }
+            catch (IOException) when (attempt < 3)
+            {
+                // File is likely in use. Try a new unique filename and retry.
+                path = Path.Combine(dir, $"{safePart}_{Guid.NewGuid().ToString("N")}_{safeFileName}");
+            }
+        }
+
+        // If we reached here the last attempt will throw so do one final try to let
+        // the caller observe the exception if it still fails.
+        await using (var finalFile = File.Create(path))
+        {
+            await content.CopyToAsync(finalFile, cancellationToken);
+        }
+
+        return path;
+    }
+
+    public Stream OpenAttachment(string cachePath) =>
+        File.OpenRead(cachePath);
+
+    public Task UpsertFoldersAsync(
+        string accountKey, IEnumerable<MailFolderInfo> folders, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            var id = accountKey;
+            _folders.Upsert(new FolderInfoDoc
+            {
+                Id = id,
+                AccountKey = accountKey,
+                Folders = folders.Select(f => new FolderInfoEntry
+                {
+                    FullName = f.FullName,
+                    Name = f.Name,
+                    Total = f.Total,
+                    Unread = f.Unread,
+                }).ToList(),
+            });
+        }, cancellationToken);
+
+    public Task<List<MailFolderInfo>> GetCachedFoldersAsync(
+        string accountKey, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            var doc = _folders.FindById(accountKey);
+            if (doc is null)
+                return new List<MailFolderInfo>();
+
+            return doc.Folders.Select(f => new MailFolderInfo
+            {
+                FullName = f.FullName,
+                Name = f.Name,
+                Total = f.Total,
+                Unread = f.Unread,
+            }).ToList();
+        }, cancellationToken);
+
+    private static string MakeSafeSegment(string value)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var chars = value.Select(c => invalid.Contains(c) ? '_' : c).ToArray();
+        var result = new string(chars);
+        return string.IsNullOrWhiteSpace(result) ? "_" : result;
+    }
+
+    private sealed class MailSummaryDoc
+    {
+        [BsonId]
+        public string Id { get; set; } = string.Empty;
+        public string AccountKey { get; set; } = string.Empty;
+        public string FolderName { get; set; } = string.Empty;
+        public string Uidl { get; set; } = string.Empty;
+        public uint Uid { get; set; }
+        public string From { get; set; } = string.Empty;
+        public string Subject { get; set; } = string.Empty;
+        public DateTimeOffset Date { get; set; }
+        public bool IsRead { get; set; }
+        public bool HasAttachments { get; set; }
+        public bool IsLocalOnly { get; set; }
+        public bool IsImportant { get; set; }
+
+        // RFC 5322 threading headers. Absent from documents written before threading capture
+        // was added; LiteDB deserializes those as empty strings rather than failing.
+        public string MessageId { get; set; } = string.Empty;
+        public string InReplyTo { get; set; } = string.Empty;
+        public string References { get; set; } = string.Empty;
+    }
+
+    private sealed class DeletedUidlDoc
+    {
+        [BsonId]
+        public string Id { get; set; } = string.Empty;
+        public string AccountKey { get; set; } = string.Empty;
+        public string FolderName { get; set; } = string.Empty;
+        public string Uidl { get; set; } = string.Empty;
+    }
+
+    private sealed class MessageBodyDoc
+    {
+        [BsonId]
+        public string Id { get; set; } = string.Empty;
+        public string AccountKey { get; set; } = string.Empty;
+        public string FolderName { get; set; } = string.Empty;
+        public string Uidl { get; set; } = string.Empty;
+        public string To { get; set; } = string.Empty;
+        public string? TextBody { get; set; }
+        public string? HtmlBody { get; set; }
+        public List<StoredMailAttachment> Attachments { get; set; } = [];
+    }
+
+    private sealed class FolderInfoEntry
+    {
+        public string FullName { get; set; } = string.Empty;
+        public string Name { get; set; } = string.Empty;
+        public int Total { get; set; }
+        public int Unread { get; set; }
+    }
+
+    private sealed class FolderInfoDoc
+    {
+        [BsonId]
+        public string Id { get; set; } = string.Empty;
+        public string AccountKey { get; set; } = string.Empty;
+        public List<FolderInfoEntry> Folders { get; set; } = [];
+    }
+}
