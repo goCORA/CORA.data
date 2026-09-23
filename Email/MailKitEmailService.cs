@@ -356,7 +356,7 @@ public class MailKitEmailService : IEmailService
             // Before returning, attach any known avatar URLs from the trusted-image store or
             // leave AvatarUrl empty (UI falls back to initials). The MailSyncDatabase stores
             // only the header summary fields; avatar resolution happens here when building
-            // EmailSummary objects to avoid scattering contact/Gravatar logic higher in the app.
+            // EmailSummary objects to avoid scattering contact-photo logic higher in the app.
             var list = cached
             .Skip(skip)
             .Take(take)
@@ -373,11 +373,11 @@ public class MailKitEmailService : IEmailService
             })
             .ToList();
 
-            // Resolve avatars: prefer local contacts (app-level ContactDatabase) then Gravatar.
+            // Resolve avatars: local contact photos only (app-level ContactDatabase), else initials.
             // Avoid heavy network calls here; callers may update AvatarUrl later. For now, only
             // consult the trusted-image sender store to decide whether to allow message-level
             // remote images (not used as avatar source) and leave AvatarUrl empty. The Contact
-            // database and Gravatar lookup are done from the app layer (MailboxPage) to preserve
+            // database lookup is done from the app layer (MailboxPage) to preserve
             // separation of concerns and keep Core project free of UI/data-layer service deps.
 
             return list;
