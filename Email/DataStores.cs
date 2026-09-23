@@ -45,6 +45,17 @@ public interface IDataStores : IDisposable
     /// just-restored files on disk are preserved intact until the next cold launch.
     /// </summary>
     void SuppressFlush();
+
+    /// <summary>
+    /// Permanently deletes all local data held by these stores: every database file (plus its
+    /// leftovers such as atomic-flush temp files and unrecovered-data backups) and the synced
+    /// attachments folder. The stores are closed first, without flushing, so the open LiteDB
+    /// instances neither hold the files locked nor write stale in-memory data back; this
+    /// instance is unusable afterwards and the host should quit. The master encryption key is
+    /// not touched. Returns the full paths of any files or folders that could not be deleted
+    /// (empty when everything was removed).
+    /// </summary>
+    Task<IReadOnlyList<string>> WipeAllAsync();
 }
 
 /// <summary>
@@ -100,6 +111,7 @@ public sealed class SecureDataStores : IDataStores, IDisposable
     private readonly AiAutonomyDatabase _aiAutonomy;
     private readonly ContactDatabase _contacts;
     private readonly IFlushableStore[] _flushableStores;
+    private readonly string _baseDir;
     private readonly CancellationTokenSource _autoFlushCts = new();
     private readonly Task _autoFlushTask;
     private readonly Timer _contactsFlushTimer;
@@ -117,10 +129,12 @@ public sealed class SecureDataStores : IDataStores, IDisposable
     public IContactStore Contacts => _contacts;
 
     private SecureDataStores(
+        string baseDir,
         TagDatabase tags, MailSyncDatabase mailSync, AccountCredentialDatabase accounts,
         TrustedImageSenderDatabase trustedImageSenders, BlacklistDatabase blacklist,
         AiAutonomyDatabase aiAutonomy, ContactDatabase contacts)
     {
+        _baseDir = baseDir;
         _tags = tags;
         _mailSync = mailSync;
         _accounts = accounts;
@@ -230,6 +244,80 @@ public sealed class SecureDataStores : IDataStores, IDisposable
     /// <inheritdoc/>
     public void SuppressFlush() => _flushSuppressed = true;
 
+    /// <inheritdoc/>
+    public Task<IReadOnlyList<string>> WipeAllAsync()
+    {
+        // Same teardown as Dispose (stops the timers, closes every LiteDB instance so Windows
+        // releases the file locks), but with flushing suppressed first so the stale in-memory
+        // data is never written back over - or recreated in - the files deleted below.
+        SuppressFlush();
+        Dispose();
+
+        return Task.Run<IReadOnlyList<string>>(() => DeleteStoreFiles(_baseDir));
+    }
+
+    private static List<string> DeleteStoreFiles(string baseDir)
+    {
+        var failed = new List<string>();
+        if (!Directory.Exists(baseDir))
+            return failed;
+
+        // Each database plus anything named after it: the atomic-flush ".tmp", the
+        // ".legacy-plaintext" migration copy and the ".unrecovered-*.bak" safety copies.
+        foreach (var name in StoreFiles.Databases)
+        {
+            foreach (var file in Directory.EnumerateFiles(baseDir, name + "*").ToList())
+                TryDeleteFile(file, failed);
+        }
+
+        var attachments = Path.Combine(baseDir, StoreFiles.AttachmentsDirectory);
+        if (Directory.Exists(attachments))
+        {
+            var failuresBefore = failed.Count;
+            foreach (var file in Directory.EnumerateFiles(attachments, "*", SearchOption.AllDirectories).ToList())
+                TryDeleteFile(file, failed);
+
+            // Only report the folder itself when its files were all removed, so a locked file
+            // isn't listed twice (once as the file, once as the folder that still contains it).
+            if (failed.Count == failuresBefore)
+            {
+                try
+                {
+                    Directory.Delete(attachments, recursive: true);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    failed.Add(attachments);
+                }
+            }
+        }
+
+        return failed;
+    }
+
+    // Antivirus/indexers can briefly hold a just-closed file on Windows, so retry a couple of
+    // times before reporting it (same approach as EncryptedLiteDbFile's atomic file replace).
+    private static void TryDeleteFile(string path, List<string> failed)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                File.Delete(path);
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                if (attempt >= 3)
+                {
+                    failed.Add(path);
+                    return;
+                }
+                Thread.Sleep(100);
+            }
+        }
+    }
+
     /// <summary>
     /// Public, non-destructive flush for platform "about to background" hooks (see
     /// <see cref="IDataStores.Flush"/>). On mobile, Window.Destroying/app-teardown signals
@@ -261,25 +349,25 @@ public sealed class SecureDataStores : IDataStores, IDisposable
 
         var baseDir = dataLocation.AppDataDirectory;
 
-        var tags = new TagDatabase(Path.Combine(baseDir, "tags.litedb"));
+        var tags = new TagDatabase(Path.Combine(baseDir, StoreFiles.Tags));
         var mailSync = new MailSyncDatabase(
-            Path.Combine(baseDir, "mailsync.litedb"),
-            Path.Combine(baseDir, "mail_attachments"));
+            Path.Combine(baseDir, StoreFiles.MailSync),
+            Path.Combine(baseDir, StoreFiles.AttachmentsDirectory));
         var accounts = new AccountCredentialDatabase(
-            Path.Combine(baseDir, "accounts.litedb"), secureKeyStorage, preferences);
+            Path.Combine(baseDir, StoreFiles.Accounts), secureKeyStorage, preferences);
         var trustedImageSenders = new TrustedImageSenderDatabase(
-            Path.Combine(baseDir, "trustedImageSenders.litedb"));
+            Path.Combine(baseDir, StoreFiles.TrustedImageSenders));
         var blacklist = new BlacklistDatabase(
-            Path.Combine(baseDir, "blacklist.litedb"));
+            Path.Combine(baseDir, StoreFiles.Blacklist));
         var aiAutonomy = new AiAutonomyDatabase(
-            Path.Combine(baseDir, "ai_autonomy.litedb"));
+            Path.Combine(baseDir, StoreFiles.AiAutonomy));
 
         // Older versions kept contacts.litedb as a plaintext LiteDB file. Convert it before the
         // encrypted store opens that path (Open() would treat the plaintext file as unreadable
         // and start empty). A failure here must not block startup, and no data is deleted:
         // if it fails after moving the plaintext aside, the next launch resumes it; if it fails
         // earlier, Open() keeps the unreadable file as contacts.litedb.unrecovered-*.bak.
-        var contactsPath = Path.Combine(baseDir, "contacts.litedb");
+        var contactsPath = Path.Combine(baseDir, StoreFiles.Contacts);
         try
         {
             LegacyContactMigration.MigrateIfNeeded(contactsPath);
@@ -290,7 +378,7 @@ public sealed class SecureDataStores : IDataStores, IDisposable
         }
         var contacts = new ContactDatabase(contactsPath);
 
-        return new SecureDataStores(tags, mailSync, accounts, trustedImageSenders, blacklist, aiAutonomy, contacts);
+        return new SecureDataStores(baseDir, tags, mailSync, accounts, trustedImageSenders, blacklist, aiAutonomy, contacts);
     }
 
     public void Dispose()

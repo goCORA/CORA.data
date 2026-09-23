@@ -115,6 +115,51 @@ public class SecureDataStoresTests : IDisposable
       Assert.False(await WaitForAsync(() => File.Exists(contactsFile), TimeSpan.FromSeconds(3)));
    }
 
+   [Fact]
+   public async Task WipeAllAsync_DeletesDatabasesLeftoversAndAttachments_AndNeverWritesThemBack()
+   {
+      var stores = await CreateStoresAsync();
+      await stores.Contacts.SaveAsync(new Contact { FirstName = "Ada", LastName = "Lovelace" });
+      await stores.Tags.AddTagAsync("work", "#ff0000");
+      stores.Flush();
+      var contactsFile = Path.Combine(_dir, "contacts.litedb");
+      Assert.True(File.Exists(contactsFile));
+
+      var attachments = Path.Combine(_dir, "mail_attachments", "acct");
+      Directory.CreateDirectory(attachments);
+      File.WriteAllText(Path.Combine(attachments, "a.pdf"), "x");
+      File.WriteAllText(contactsFile + ".unrecovered-20260101000000.bak", "x");
+      File.WriteAllText(Path.Combine(_dir, "tags.litedb.tmp"), "x");
+      var unrelated = Path.Combine(_dir, "keep.txt");
+      File.WriteAllText(unrelated, "x");
+
+      // A change made just before the wipe must not survive via the debounced/periodic flush.
+      await stores.Contacts.SaveAsync(new Contact { FirstName = "Grace", LastName = "Hopper" });
+      var failed = await stores.WipeAllAsync();
+
+      Assert.Empty(failed);
+      Assert.Empty(Directory.EnumerateFiles(_dir, "*.litedb*"));
+      Assert.False(Directory.Exists(Path.Combine(_dir, "mail_attachments")));
+      Assert.True(File.Exists(unrelated));
+      Assert.False(await WaitForAsync(() => File.Exists(contactsFile), TimeSpan.FromSeconds(3)));
+   }
+
+   [Fact]
+   public async Task WipeAllAsync_ReportsFilesThatCouldNotBeDeleted()
+   {
+      if (!OperatingSystem.IsWindows())
+         return; // deleting an open file only fails on Windows
+
+      var stores = await CreateStoresAsync();
+      var locked = Path.Combine(_dir, "blacklist.litedb.bak");
+      File.WriteAllText(locked, "x");
+      using var hold = new FileStream(locked, FileMode.Open, FileAccess.Read, FileShare.None);
+
+      var failed = await stores.WipeAllAsync();
+
+      Assert.Equal([locked], failed);
+   }
+
    private static async Task<bool> WaitForAsync(Func<bool> condition, TimeSpan timeout)
    {
       var deadline = DateTime.UtcNow + timeout;

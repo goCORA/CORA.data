@@ -17,18 +17,10 @@ namespace CORA.Data.Backup;
 /// </summary>
 public sealed class DatabaseBackupService
 {
-    private static readonly string[] DatabaseFileNames =
-    [
-        "tags.litedb",
-        "mailsync.litedb",
-        "accounts.litedb",
-        "contacts.litedb",
-        "trustedImageSenders.litedb",
-        "blacklist.litedb",
-        "ai_autonomy.litedb",
-    ];
+    // The file layout lives in StoreFiles, shared with SecureDataStores (open/wipe).
+    private static readonly string[] DatabaseFileNames = StoreFiles.Databases;
 
-    private const string AttachmentsDirectoryName = "mail_attachments";
+    private const string AttachmentsDirectoryName = StoreFiles.AttachmentsDirectory;
 
     private readonly IAppDataLocation _dataLocation;
     private readonly ISecureKeyStorage _secureKeyStorage;
@@ -133,13 +125,13 @@ public sealed class DatabaseBackupService
 
         // Map logical selections to the filenames used in backups.
         var allowFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (restoreTags) allowFiles.Add("tags.litedb");
-        if (restoreAccounts) allowFiles.Add("accounts.litedb");
-        if (restoreContacts) allowFiles.Add("contacts.litedb");
-        if (restoreMailboxes) allowFiles.Add("mailsync.litedb");
-        if (restoreTrustedImageSenders) allowFiles.Add("trustedImageSenders.litedb");
-        if (restoreBlacklist) allowFiles.Add("blacklist.litedb");
-        if (restoreAiAutonomy) allowFiles.Add("ai_autonomy.litedb");
+        if (restoreTags) allowFiles.Add(StoreFiles.Tags);
+        if (restoreAccounts) allowFiles.Add(StoreFiles.Accounts);
+        if (restoreContacts) allowFiles.Add(StoreFiles.Contacts);
+        if (restoreMailboxes) allowFiles.Add(StoreFiles.MailSync);
+        if (restoreTrustedImageSenders) allowFiles.Add(StoreFiles.TrustedImageSenders);
+        if (restoreBlacklist) allowFiles.Add(StoreFiles.Blacklist);
+        if (restoreAiAutonomy) allowFiles.Add(StoreFiles.AiAutonomy);
 
         using var zip = new ZipArchive(source, ZipArchiveMode.Read, leaveOpen: true);
         foreach (var entry in zip.Entries)
