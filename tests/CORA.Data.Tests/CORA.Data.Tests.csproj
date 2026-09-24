@@ -9,6 +9,8 @@
 
   <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <!-- Same version as CORA.App; needed by the linked MailBodyText below. -->
+    <PackageReference Include="HtmlAgilityPack" Version="1.13.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
@@ -22,6 +24,20 @@
     <!-- CORA.Core is a sibling repository: clone it next to CORA.Data. -->
     <ProjectReference Include="..\..\..\CORA.Core\CORA.Core.csproj" />
     <ProjectReference Include="..\..\CORA.Data.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Sources from CORA.App, LINKED (compiled into this assembly) for the tests in App\. CORA.App multi-targets
+      MAUI and cannot be referenced from a plain net10.0 project, so only MAUI-free files may be linked here:
+      no Preferences, MainThread, Shell, ... - take an interface such as IPreferenceStore instead.
+      CORA.App is a sibling repository: clone it next to CORA.Data (like CORA.Core above).
+    -->
+    <Compile Include="..\..\..\CORA.App\Services\AI\AiProviderType.cs" Link="App\Linked\AiProviderType.cs" />
+    <Compile Include="..\..\..\CORA.App\Services\AI\AiProviderException.cs" Link="App\Linked\AiProviderException.cs" />
+    <Compile Include="..\..\..\CORA.App\Services\AI\AiConsentRequiredException.cs" Link="App\Linked\AiConsentRequiredException.cs" />
+    <Compile Include="..\..\..\CORA.App\Services\AI\AiConsent.cs" Link="App\Linked\AiConsent.cs" />
+    <Compile Include="..\..\..\CORA.App\Services\AI\MailBodyText.cs" Link="App\Linked\MailBodyText.cs" />
   </ItemGroup>
 
 </Project>
