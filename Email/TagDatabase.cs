@@ -129,6 +129,18 @@ public class TagDatabase : ITagStore, IFlushableStore, IDisposable
             });
         }, cancellationToken);
 
+    public Task DeleteAccountAssignmentsAsync(string emailAddress, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            // Same normalization as MailKitEmailService.AccountKey.
+            var accountKey = emailAddress.Trim().ToLowerInvariant();
+            if (accountKey.Length == 0)
+                return;
+
+            // Tag definitions are global and stay; only this account's assignments go.
+            _messageTags.DeleteMany(m => m.AccountKey == accountKey);
+        }, cancellationToken);
+
     private sealed class TagDoc
     {
         [BsonId]

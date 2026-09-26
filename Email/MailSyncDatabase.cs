@@ -611,6 +611,39 @@ public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
             }).ToList();
         }, cancellationToken);
 
+    public Task DeleteAccountDataAsync(string emailAddress, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            // Same normalization as MailKitEmailService.AccountKey.
+            var accountKey = emailAddress.Trim().ToLowerInvariant();
+            if (accountKey.Length == 0)
+                return;
+
+            _summaries.DeleteMany(s => s.AccountKey == accountKey);
+            _bodies.DeleteMany(b => b.AccountKey == accountKey);
+            _deletedUidls.DeleteMany(d => d.AccountKey == accountKey);
+            _folders.DeleteMany(f => f.AccountKey == accountKey);
+
+            // Forget per-process bookkeeping so a later re-add of the same address starts clean.
+            var prefix = accountKey + "|";
+            foreach (var key in _uidCounters.Keys.Where(k => k.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).ToList())
+                _uidCounters.TryRemove(key, out _);
+            foreach (var key in _repairedFolders.Keys.Where(k => k.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).ToList())
+                _repairedFolders.TryRemove(key, out _);
+
+            // Attachment bytes live outside the database, one folder per account.
+            try
+            {
+                var dir = Path.Combine(_attachmentsRoot, MakeSafeSegment(accountKey));
+                if (Directory.Exists(dir))
+                    Directory.Delete(dir, recursive: true);
+            }
+            catch
+            {
+                // Best-effort, like DeleteAsync: the rows are gone; a stray cache file is not worth failing over.
+            }
+        }, cancellationToken);
+
     private static string MakeSafeSegment(string value)
     {
         var invalid = Path.GetInvalidFileNameChars();

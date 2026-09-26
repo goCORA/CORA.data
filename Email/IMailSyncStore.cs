@@ -197,4 +197,12 @@ public interface IMailSyncStore
     /// </summary>
     Task<List<MailFolderInfo>> GetCachedFoldersAsync(
         string accountKey, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Removes everything cached locally for an account: summaries, bodies, deletion
+    /// tombstones, the cached folder list and the attachment files on disk. Used when the
+    /// account is deleted from the app. <paramref name="emailAddress"/> is the account's
+    /// address; it is normalized to the same key the other methods are given.
+    /// </summary>
+    Task DeleteAccountDataAsync(string emailAddress, CancellationToken cancellationToken = default);
 }

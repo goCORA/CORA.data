@@ -14,6 +14,7 @@ internal static class StoreFiles
     public const string TrustedImageSenders = "trustedImageSenders.litedb";
     public const string Blacklist = "blacklist.litedb";
     public const string AiAutonomy = "ai_autonomy.litedb";
+    public const string HiddenFolders = "hidden_folders.litedb";
 
     /// <summary>Subdirectory of the app data directory holding synced (POP3) attachments.</summary>
     public const string AttachmentsDirectory = "mail_attachments";
@@ -28,5 +29,6 @@ internal static class StoreFiles
         TrustedImageSenders,
         Blacklist,
         AiAutonomy,
+        HiddenFolders,
     ];
 }

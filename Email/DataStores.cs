@@ -18,6 +18,7 @@ public interface IDataStores : IDisposable
     IBlacklistStore Blacklist { get; }
     IAiAutonomyStore AiAutonomy { get; }
     IContactStore Contacts { get; }
+    IHiddenFolderStore HiddenFolders { get; }
 
     /// <summary>
     /// Immediately flushes every store to disk without closing anything. Safe to call
@@ -110,6 +111,7 @@ public sealed class SecureDataStores : IDataStores, IDisposable
     private readonly BlacklistDatabase _blacklist;
     private readonly AiAutonomyDatabase _aiAutonomy;
     private readonly ContactDatabase _contacts;
+    private readonly HiddenFolderDatabase _hiddenFolders;
     private readonly IFlushableStore[] _flushableStores;
     private readonly string _baseDir;
     private readonly CancellationTokenSource _autoFlushCts = new();
@@ -127,12 +129,13 @@ public sealed class SecureDataStores : IDataStores, IDisposable
     public IBlacklistStore Blacklist => _blacklist;
     public IAiAutonomyStore AiAutonomy => _aiAutonomy;
     public IContactStore Contacts => _contacts;
+    public IHiddenFolderStore HiddenFolders => _hiddenFolders;
 
     private SecureDataStores(
         string baseDir,
         TagDatabase tags, MailSyncDatabase mailSync, AccountCredentialDatabase accounts,
         TrustedImageSenderDatabase trustedImageSenders, BlacklistDatabase blacklist,
-        AiAutonomyDatabase aiAutonomy, ContactDatabase contacts)
+        AiAutonomyDatabase aiAutonomy, ContactDatabase contacts, HiddenFolderDatabase hiddenFolders)
     {
         _baseDir = baseDir;
         _tags = tags;
@@ -142,7 +145,8 @@ public sealed class SecureDataStores : IDataStores, IDisposable
         _blacklist = blacklist;
         _aiAutonomy = aiAutonomy;
         _contacts = contacts;
-        _flushableStores = [_tags, _mailSync, _accounts, _trustedImageSenders, _blacklist, _aiAutonomy, _contacts];
+        _hiddenFolders = hiddenFolders;
+        _flushableStores = [_tags, _mailSync, _accounts, _trustedImageSenders, _blacklist, _aiAutonomy, _contacts, _hiddenFolders];
 
         // Option B: background safety-net flush, so a mid-session OS kill (which never
         // gives Dispose() a chance to run) loses at most a few seconds of writes instead
@@ -378,7 +382,19 @@ public sealed class SecureDataStores : IDataStores, IDisposable
         }
         var contacts = new ContactDatabase(contactsPath);
 
-        return new SecureDataStores(baseDir, tags, mailSync, accounts, trustedImageSenders, blacklist, aiAutonomy, contacts);
+        // The hidden-folder list used to live in a plaintext preference; move it into the encrypted
+        // store. Best-effort: on failure the preference stays and the import is retried next launch.
+        var hiddenFolders = new HiddenFolderDatabase(Path.Combine(baseDir, StoreFiles.HiddenFolders));
+        try
+        {
+            hiddenFolders.ImportLegacyPreference(preferences);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Hidden-folder preference import failed; will retry next launch: {ex}");
+        }
+
+        return new SecureDataStores(baseDir, tags, mailSync, accounts, trustedImageSenders, blacklist, aiAutonomy, contacts, hiddenFolders);
     }
 
     public void Dispose()
@@ -416,7 +432,7 @@ public sealed class SecureDataStores : IDataStores, IDisposable
 
         // Best-effort per store: a failed final flush in one (e.g. the atomic file replace
         // still being blocked after its retries) must not stop the others from flushing.
-        foreach (var store in (IDisposable[])[_tags, _mailSync, _accounts, _trustedImageSenders, _blacklist, _aiAutonomy, _contacts])
+        foreach (var store in (IDisposable[])[_tags, _mailSync, _accounts, _trustedImageSenders, _blacklist, _aiAutonomy, _contacts, _hiddenFolders])
         {
             try
             {

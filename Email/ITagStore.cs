@@ -51,4 +51,11 @@ public interface ITagStore
     /// <summary>Assigns (or replaces) the tag on a message. Pass null tagId to clear it.</summary>
     Task SetMessageTagAsync(
         string accountKey, string folderFullName, uint uid, string? tagId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Removes every tag assignment belonging to an account (used when the account is deleted).
+    /// Tag definitions are global and are never deleted by this. <paramref name="emailAddress"/>
+    /// is normalized to the same key the other methods are given.
+    /// </summary>
+    Task DeleteAccountAssignmentsAsync(string emailAddress, CancellationToken cancellationToken = default);
 }

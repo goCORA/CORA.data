@@ -10,7 +10,7 @@ public class DatabaseBackupServiceTests : IDisposable
    private static readonly string[] AllStoreFiles =
    [
       "tags.litedb", "mailsync.litedb", "accounts.litedb", "contacts.litedb",
-      "trustedImageSenders.litedb", "blacklist.litedb", "ai_autonomy.litedb",
+      "trustedImageSenders.litedb", "blacklist.litedb", "ai_autonomy.litedb", "hidden_folders.litedb",
    ];
 
    private readonly string _dir = Path.Combine(Path.GetTempPath(), "cora-tests-" + Guid.NewGuid().ToString("N"));
@@ -62,6 +62,25 @@ public class DatabaseBackupServiceTests : IDisposable
 
       using var zip = new ZipArchive(backup, ZipArchiveMode.Read);
       Assert.Equal(AllStoreFiles.Order(), zip.Entries.Select(e => e.FullName).Order());
+   }
+
+   [Fact]
+   public void RestoreBackupArchive_RestoresHiddenFolders_WithTheAccountsToggle_AndNotWithout()
+   {
+      WriteAllStoreFiles("original");
+      using var backup = BackupOfCurrentFiles();
+      WriteAllStoreFiles("changed-since-backup");
+
+      _service.RestoreBackupArchive(
+         backup, restoreAccounts: true, restoreTags: false, restoreContacts: false,
+         restoreMailboxes: false, restoreTrustedImageSenders: false,
+         restoreBlacklist: false, restoreAiAutonomy: false);
+
+      foreach (var name in AllStoreFiles)
+      {
+         var expected = name is "accounts.litedb" or "hidden_folders.litedb" ? "original" : "changed-since-backup";
+         Assert.Equal($"{expected}:{name}", File.ReadAllText(Path.Combine(_dir, name)));
+      }
    }
 
    [Theory]
