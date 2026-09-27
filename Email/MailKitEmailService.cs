@@ -727,7 +727,7 @@ public class MailKitEmailService : IEmailService
         var account = RequireAccount();
         var accountKey = AccountKey(account);
 
-        var uidl = await _syncStore.GetUidlForUidAsync(accountKey, folderFullName, uid, cancellationToken)
+        var uidl = await GetUidlForUidWithResyncAsync(account, accountKey, folderFullName, uid, cancellationToken)
             .ConfigureAwait(false)
             ?? throw new InvalidOperationException("Message not found in local cache.");
 
@@ -744,6 +744,39 @@ public class MailKitEmailService : IEmailService
         var summary = await GetCachedSummaryForUidAsync(accountKey, folderFullName, uid, cancellationToken)
             .ConfigureAwait(false);
         return BuildMessageFromCache(uid, folderFullName, summary, body);
+    }
+
+    /// <summary>
+    /// Resolves a message's UIDL from the local cache, and, for POP3 accounts only, falls
+    /// back to a one-time re-sync of the folder and retries the lookup before giving up.
+    /// POP3 uids are locally-assigned (see <see cref="SyncFolderAsync"/>) and a message the
+    /// user just tapped from a freshly-loaded mailbox list can occasionally not yet be
+    /// reflected in the cache read used here (e.g. it arrived in the same refresh cycle, or
+    /// the background flag/orphan-repair maintenance reassigned uids concurrently) - without
+    /// this retry that race surfaces to the user as "Message not found in local cache." even
+    /// though the message is genuinely present. IMAP uids are the server's own stable
+    /// identifiers, so a resync cannot change the outcome and is skipped.
+    /// </summary>
+    private async Task<string?> GetUidlForUidWithResyncAsync(
+        MailAccount account, string accountKey, string folderFullName, uint uid, CancellationToken cancellationToken)
+    {
+        var uidl = await _syncStore.GetUidlForUidAsync(accountKey, folderFullName, uid, cancellationToken)
+            .ConfigureAwait(false);
+        if (uidl is not null || !account.IsPop3)
+            return uidl;
+
+        try
+        {
+            await SyncFolderAsync(folderFullName, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Best-effort: fall through to the retry below, which will simply fail again
+            // with the original "not found" error if the resync itself couldn't help.
+        }
+
+        return await _syncStore.GetUidlForUidAsync(accountKey, folderFullName, uid, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <summary>
@@ -812,7 +845,7 @@ public class MailKitEmailService : IEmailService
         var account = RequireAccount();
         var accountKey = AccountKey(account);
 
-        var uidl = await _syncStore.GetUidlForUidAsync(accountKey, folderFullName, uid, cancellationToken)
+        var uidl = await GetUidlForUidWithResyncAsync(account, accountKey, folderFullName, uid, cancellationToken)
             .ConfigureAwait(false)
             ?? throw new InvalidOperationException("Message not found in local cache.");
 
