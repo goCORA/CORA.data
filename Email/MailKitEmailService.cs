@@ -1681,6 +1681,12 @@ public class MailKitEmailService : IEmailService
             mime.Bcc.Add(MailboxAddress.Parse(recipient));
         mime.Subject = message.Subject;
 
+        // Build the Message-ID from the sender's own domain. Left unset, MimeKit uses the
+        // device's host name (e.g. <...@cora-l>), which spam filters score heavily against
+        // (SmarterMail's MessageAI rejected such mail outright) and which leaks the user's
+        // PC/phone name to every recipient.
+        mime.MessageId = MimeKit.Utils.MimeUtils.GenerateMessageId(SenderDomain(account.EmailAddress));
+
         // RFC 5322 section 3.6.4 threading. Without these a reply arrives at the recipient as a
         // brand-new conversation rather than threading under the message it answers, which is a
         // correctness problem in what we emit - not merely a local display issue.
@@ -1836,10 +1842,35 @@ public class MailKitEmailService : IEmailService
     internal static async Task<ImapClient> ConnectImapAsync(
         MailAccount account, CancellationToken cancellationToken)
     {
-        var imap = new ImapClient { CheckCertificateRevocation = false };
-        await imap.ConnectAsync(account.ImapHost, account.ImapPort,
-            ToSecureSocketOptions(account.ImapSecurity),
-            cancellationToken).ConfigureAwait(false);
+        var certificateCheck = new MailCertificateCheck();
+        var imap = new ImapClient
+        {
+            CheckCertificateRevocation = false,
+            // Strict: only a certificate with no errors is accepted (see MailCertificateCheck).
+            ServerCertificateValidationCallback = certificateCheck.Validate,
+        };
+        try
+        {
+            // "Refuse unencrypted connections" upgrades None to STARTTLS-required.
+            await imap.ConnectAsync(account.ImapHost, account.ImapPort,
+                MailConnectionPolicy.Apply(ToSecureSocketOptions(account.ImapSecurity)),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (certificateCheck.ToException(
+            "IMAP", account.ImapHost, account.ImapPort, account.EmailAddress, ex) is { } certificateError)
+        {
+            imap.Dispose();
+            throw certificateError;
+        }
+        catch (Exception ex) when (MailConnectionPolicy.ToException(
+            ex, "IMAP", account.ImapHost, account.ImapPort, account.EmailAddress) is { } unencryptedError)
+        {
+            imap.Dispose();
+            throw unencryptedError;
+        }
+
+        // Never send the password over a plain-text connection while encryption is required.
+        MailConnectionPolicy.EnsureSecure(imap, "IMAP", account.ImapHost, account.ImapPort, account.EmailAddress);
         await AuthenticateAsync(imap, account, cancellationToken).ConfigureAwait(false);
         return imap;
     }
@@ -1874,6 +1905,7 @@ public class MailKitEmailService : IEmailService
     internal static async Task<Pop3Client> ConnectPop3Async(
         MailAccount account, CancellationToken cancellationToken)
     {
+        var certificateCheck = new MailCertificateCheck();
         var pop3 = new Pop3Client(new DebugProtocolLogger("POP3"))
         {
 
@@ -1881,18 +1913,21 @@ public class MailKitEmailService : IEmailService
                          | System.Security.Authentication.SslProtocols.Tls11
                          | System.Security.Authentication.SslProtocols.Tls12
                          | System.Security.Authentication.SslProtocols.Tls13,
-            ServerCertificateValidationCallback = (sender, certificate, chain, errors) =>
-                errors == System.Net.Security.SslPolicyErrors.None || certificate is not null,
+            // Strict: only a certificate with no errors is accepted. This previously accepted
+            // ANY certificate, which let anyone on the network impersonate the mail server.
+            ServerCertificateValidationCallback = certificateCheck.Validate,
         };
 
-        // Derive the correct security option from port: 995 = implicit SSL, 110 = STARTTLS.
-        // Ignore the user's ImapSecurity setting for POP3 — a StartTls/SSL mismatch is the
-        // most common cause of handshake hangs and cannot be fixed from the UI reliably.
-        var secureOpts = account.ImapPort == 995
-            ? SecureSocketOptions.SslOnConnect
-            : account.ImapPort == 110
-                ? SecureSocketOptions.StartTls
-                : SecureSocketOptions.Auto;
+        // Honour the account's Security setting, exactly like IMAP: SSL = implicit TLS,
+        // TLS = STARTTLS, None = plain (upgraded to STARTTLS-required below while
+        // "Refuse unencrypted connections" is on). This used to be derived from the port and
+        // silently ignored the setting, so the sign-in screen could say "None" for what was
+        // really an encrypted connection. The sign-in screen's auto-port keeps the two in step
+        // (SSL -> 995, TLS/None -> 110); a mismatch such as TLS on 995 now fails with an error
+        // pointing the user at the account settings rather than being guessed around.
+        var secureOpts = ToSecureSocketOptions(account.ImapSecurity);
+        // "Refuse unencrypted connections": Auto could silently fall back to plain text.
+        secureOpts = MailConnectionPolicy.Apply(secureOpts);
 
         System.Diagnostics.Debug.WriteLine(
             $"[POP3] Connecting to {account.ImapHost}:{account.ImapPort} security={secureOpts}");
@@ -1912,12 +1947,31 @@ public class MailKitEmailService : IEmailService
             deadline.Cancel(); // clean up
             throw new TimeoutException(
                 $"POP3 connection to {account.ImapHost}:{account.ImapPort} " +
-                $"(security={secureOpts}) timed out after 20 s.");
+                $"(security={secureOpts}) timed out after 20 s. " +
+                "Check that Security matches the port: SSL for 995, TLS for 110.");
         }
 
         deadline.Cancel(); // stop the deadline timer
 
-        await connectTask.ConfigureAwait(false);
+        try
+        {
+            await connectTask.ConfigureAwait(false);
+        }
+        catch (Exception ex) when (certificateCheck.ToException(
+            "POP3", account.ImapHost, account.ImapPort, account.EmailAddress, ex) is { } certificateError)
+        {
+            pop3.Dispose();
+            throw certificateError;
+        }
+        catch (Exception ex) when (MailConnectionPolicy.ToException(
+            ex, "POP3", account.ImapHost, account.ImapPort, account.EmailAddress) is { } unencryptedError)
+        {
+            pop3.Dispose();
+            throw unencryptedError;
+        }
+
+        // Never send the password over a plain-text connection while encryption is required.
+        MailConnectionPolicy.EnsureSecure(pop3, "POP3", account.ImapHost, account.ImapPort, account.EmailAddress);
 
         // Basic shared-hosting POP3 servers only support USER/PASS. MailKit will try SASL
         // mechanisms (GSSAPI, NTLM, ...) first if the server advertises them, and those
@@ -1950,27 +2004,47 @@ public class MailKitEmailService : IEmailService
         return pop3;
     }
 
+    /// <summary>
+    /// The domain part of an email address ("joe@piev.com" gives "piev.com"), lower-cased, used
+    /// for the SMTP EHLO name and generated Message-IDs so neither reveals the device name.
+    /// Falls back to "localhost.localdomain" if the address has no usable domain.
+    /// </summary>
+    internal static string SenderDomain(string? emailAddress)
+    {
+        var at = emailAddress?.LastIndexOf('@') ?? -1;
+        var domain = at >= 0 ? emailAddress![(at + 1)..].Trim().TrimEnd('>').ToLowerInvariant() : string.Empty;
+        return domain.Contains('.') ? domain : "localhost.localdomain";
+    }
+
     internal static async Task<SmtpClient> ConnectSmtpAsync(
         MailAccount account, CancellationToken cancellationToken)
     {
+        var certificateCheck = new MailCertificateCheck();
         var smtp = new SmtpClient(new DebugProtocolLogger("SMTP"))
         {
             CheckCertificateRevocation = false,
-            ServerCertificateValidationCallback = (sender, certificate, chain, errors) =>
-                errors == System.Net.Security.SslPolicyErrors.None || certificate is not null,
+            // Strict: only a certificate with no errors is accepted. This previously accepted
+            // ANY certificate, which let anyone on the network impersonate the mail server.
+            ServerCertificateValidationCallback = certificateCheck.Validate,
         };
 
-        // Derive the correct security option from port, same as POP3: 465 = implicit SSL
-        // (SMTPS), 587/25 = STARTTLS. A StartTls setting on port 465 stalls the handshake
-        // because the server sends TLS immediately instead of a plain-text greeting.
-        var secureOpts = account.SmtpPort == 465
-            ? SecureSocketOptions.SslOnConnect
-            : account.SmtpPort is 587 or 25
-                ? SecureSocketOptions.StartTls
-                : SecureSocketOptions.Auto;
+        // Honour the account's Security setting, exactly like IMAP and POP3: SSL = implicit TLS
+        // (SMTPS, normally port 465), TLS = STARTTLS (normally 587 or 25), None = plain
+        // (upgraded to STARTTLS-required below while "Refuse unencrypted connections" is on).
+        // This used to be derived from the port and silently ignored the setting. The sign-in
+        // screen's auto-port keeps the two in step; a mismatch (e.g. TLS on 465, where the
+        // server expects TLS immediately) fails with an error pointing at the account settings.
+        var secureOpts = ToSecureSocketOptions(account.SmtpSecurity);
+        // "Refuse unencrypted connections": Auto could silently fall back to plain text.
+        secureOpts = MailConnectionPolicy.Apply(secureOpts);
 
         System.Diagnostics.Debug.WriteLine(
             $"[SMTP] Connecting to {account.SmtpHost}:{account.SmtpPort} security={secureOpts}");
+
+        // Name used in the SMTP EHLO greeting. MailKit defaults to the device's host name
+        // (e.g. "EHLO CORA-L"): a bare, non-domain name is a strong spam signal and exposes
+        // the device name in the Received header of every message. Use the sender's domain.
+        smtp.LocalDomain = SenderDomain(account.EmailAddress);
 
         var connectTask = smtp.ConnectAsync(
             account.SmtpHost, account.SmtpPort, secureOpts, cancellationToken);
@@ -1982,10 +2056,29 @@ public class MailKitEmailService : IEmailService
         {
             throw new TimeoutException(
                 $"SMTP connection to {account.SmtpHost}:{account.SmtpPort} " +
-                $"(security={secureOpts}) timed out after 20 s.");
+                $"(security={secureOpts}) timed out after 20 s. " +
+                "Check that Security matches the port: SSL for 465, TLS for 587 or 25.");
         }
 
-        await connectTask.ConfigureAwait(false);
+        try
+        {
+            await connectTask.ConfigureAwait(false);
+        }
+        catch (Exception ex) when (certificateCheck.ToException(
+            "SMTP", account.SmtpHost, account.SmtpPort, account.EmailAddress, ex) is { } certificateError)
+        {
+            smtp.Dispose();
+            throw certificateError;
+        }
+        catch (Exception ex) when (MailConnectionPolicy.ToException(
+            ex, "SMTP", account.SmtpHost, account.SmtpPort, account.EmailAddress) is { } unencryptedError)
+        {
+            smtp.Dispose();
+            throw unencryptedError;
+        }
+
+        // Never send the password over a plain-text connection while encryption is required.
+        MailConnectionPolicy.EnsureSecure(smtp, "SMTP", account.SmtpHost, account.SmtpPort, account.EmailAddress);
 
         System.Diagnostics.Debug.WriteLine("[SMTP] Connected, authenticating");
 
