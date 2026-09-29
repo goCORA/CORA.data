@@ -19,6 +19,7 @@ public interface IDataStores : IDisposable
     IAiAutonomyStore AiAutonomy { get; }
     IContactStore Contacts { get; }
     IHiddenFolderStore HiddenFolders { get; }
+    IAiResultCacheStore AiResultCache { get; }
 
     /// <summary>
     /// Immediately flushes every store to disk without closing anything. Safe to call
@@ -112,6 +113,7 @@ public sealed class SecureDataStores : IDataStores, IDisposable
     private readonly AiAutonomyDatabase _aiAutonomy;
     private readonly ContactDatabase _contacts;
     private readonly HiddenFolderDatabase _hiddenFolders;
+    private readonly AiResultCacheDatabase _aiResultCache;
     private readonly IFlushableStore[] _flushableStores;
     private readonly string _baseDir;
     private readonly CancellationTokenSource _autoFlushCts = new();
@@ -130,12 +132,14 @@ public sealed class SecureDataStores : IDataStores, IDisposable
     public IAiAutonomyStore AiAutonomy => _aiAutonomy;
     public IContactStore Contacts => _contacts;
     public IHiddenFolderStore HiddenFolders => _hiddenFolders;
+    public IAiResultCacheStore AiResultCache => _aiResultCache;
 
     private SecureDataStores(
         string baseDir,
         TagDatabase tags, MailSyncDatabase mailSync, AccountCredentialDatabase accounts,
         TrustedImageSenderDatabase trustedImageSenders, BlacklistDatabase blacklist,
-        AiAutonomyDatabase aiAutonomy, ContactDatabase contacts, HiddenFolderDatabase hiddenFolders)
+        AiAutonomyDatabase aiAutonomy, ContactDatabase contacts, HiddenFolderDatabase hiddenFolders,
+        AiResultCacheDatabase aiResultCache)
     {
         _baseDir = baseDir;
         _tags = tags;
@@ -146,7 +150,8 @@ public sealed class SecureDataStores : IDataStores, IDisposable
         _aiAutonomy = aiAutonomy;
         _contacts = contacts;
         _hiddenFolders = hiddenFolders;
-        _flushableStores = [_tags, _mailSync, _accounts, _trustedImageSenders, _blacklist, _aiAutonomy, _contacts, _hiddenFolders];
+        _aiResultCache = aiResultCache;
+        _flushableStores = [_tags, _mailSync, _accounts, _trustedImageSenders, _blacklist, _aiAutonomy, _contacts, _hiddenFolders, _aiResultCache];
 
         // Option B: background safety-net flush, so a mid-session OS kill (which never
         // gives Dispose() a chance to run) loses at most a few seconds of writes instead
@@ -365,6 +370,8 @@ public sealed class SecureDataStores : IDataStores, IDisposable
             Path.Combine(baseDir, StoreFiles.Blacklist));
         var aiAutonomy = new AiAutonomyDatabase(
             Path.Combine(baseDir, StoreFiles.AiAutonomy));
+        var aiResultCache = new AiResultCacheDatabase(
+            Path.Combine(baseDir, StoreFiles.AiResultCache));
 
         // Older versions kept contacts.litedb as a plaintext LiteDB file. Convert it before the
         // encrypted store opens that path (Open() would treat the plaintext file as unreadable
@@ -394,7 +401,7 @@ public sealed class SecureDataStores : IDataStores, IDisposable
             System.Diagnostics.Debug.WriteLine($"Hidden-folder preference import failed; will retry next launch: {ex}");
         }
 
-        return new SecureDataStores(baseDir, tags, mailSync, accounts, trustedImageSenders, blacklist, aiAutonomy, contacts, hiddenFolders);
+        return new SecureDataStores(baseDir, tags, mailSync, accounts, trustedImageSenders, blacklist, aiAutonomy, contacts, hiddenFolders, aiResultCache);
     }
 
     public void Dispose()
@@ -432,7 +439,7 @@ public sealed class SecureDataStores : IDataStores, IDisposable
 
         // Best-effort per store: a failed final flush in one (e.g. the atomic file replace
         // still being blocked after its retries) must not stop the others from flushing.
-        foreach (var store in (IDisposable[])[_tags, _mailSync, _accounts, _trustedImageSenders, _blacklist, _aiAutonomy, _contacts, _hiddenFolders])
+        foreach (var store in (IDisposable[])[_tags, _mailSync, _accounts, _trustedImageSenders, _blacklist, _aiAutonomy, _contacts, _hiddenFolders, _aiResultCache])
         {
             try
             {

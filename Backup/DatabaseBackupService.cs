@@ -117,7 +117,7 @@ public sealed class DatabaseBackupService
     /// database files, overwriting any existing ones. Callers can choose which logical
     /// stores to restore.
     /// </summary>
-    public void RestoreBackupArchive(Stream source, bool restoreAccounts, bool restoreTags, bool restoreContacts, bool restoreMailboxes, bool restoreTrustedImageSenders, bool restoreBlacklist, bool restoreAiAutonomy)
+    public void RestoreBackupArchive(Stream source, bool restoreAccounts, bool restoreTags, bool restoreContacts, bool restoreMailboxes, bool restoreTrustedImageSenders, bool restoreBlacklist, bool restoreAiAutonomy, bool restoreAiResultCache)
     {
         ArgumentNullException.ThrowIfNull(source);
 
@@ -134,6 +134,7 @@ public sealed class DatabaseBackupService
         if (restoreTrustedImageSenders) allowFiles.Add(StoreFiles.TrustedImageSenders);
         if (restoreBlacklist) allowFiles.Add(StoreFiles.Blacklist);
         if (restoreAiAutonomy) allowFiles.Add(StoreFiles.AiAutonomy);
+        if (restoreAiResultCache) allowFiles.Add(StoreFiles.AiResultCache);
 
         using var zip = new ZipArchive(source, ZipArchiveMode.Read, leaveOpen: true);
         foreach (var entry in zip.Entries)

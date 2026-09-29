@@ -11,6 +11,7 @@ public class DatabaseBackupServiceTests : IDisposable
    [
       "tags.litedb", "mailsync.litedb", "accounts.litedb", "contacts.litedb",
       "trustedImageSenders.litedb", "blacklist.litedb", "ai_autonomy.litedb", "hidden_folders.litedb",
+      "ai_result_cache.litedb",
    ];
 
    private readonly string _dir = Path.Combine(Path.GetTempPath(), "cora-tests-" + Guid.NewGuid().ToString("N"));
@@ -74,7 +75,7 @@ public class DatabaseBackupServiceTests : IDisposable
       _service.RestoreBackupArchive(
          backup, restoreAccounts: true, restoreTags: false, restoreContacts: false,
          restoreMailboxes: false, restoreTrustedImageSenders: false,
-         restoreBlacklist: false, restoreAiAutonomy: false);
+         restoreBlacklist: false, restoreAiAutonomy: false, restoreAiResultCache: false);
 
       foreach (var name in AllStoreFiles)
       {
@@ -84,11 +85,13 @@ public class DatabaseBackupServiceTests : IDisposable
    }
 
    [Theory]
-   [InlineData(true, false, "blacklist.litedb")]
-   [InlineData(false, true, "ai_autonomy.litedb")]
-   [InlineData(true, true, "blacklist.litedb", "ai_autonomy.litedb")]
-   [InlineData(false, false)]
-   public void RestoreBackupArchive_RestoresOnlyTheSelectedStores(bool blacklist, bool aiAutonomy, params string[] expectedRestored)
+   [InlineData(true, false, false, "blacklist.litedb")]
+   [InlineData(false, true, false, "ai_autonomy.litedb")]
+   [InlineData(false, false, true, "ai_result_cache.litedb")]
+   [InlineData(true, true, true, "blacklist.litedb", "ai_autonomy.litedb", "ai_result_cache.litedb")]
+   [InlineData(false, false, false)]
+   public void RestoreBackupArchive_RestoresOnlyTheSelectedStores(
+      bool blacklist, bool aiAutonomy, bool aiResultCache, params string[] expectedRestored)
    {
       WriteAllStoreFiles("original");
       using var backup = BackupOfCurrentFiles();
@@ -97,7 +100,7 @@ public class DatabaseBackupServiceTests : IDisposable
       _service.RestoreBackupArchive(
          backup, restoreAccounts: false, restoreTags: false, restoreContacts: false,
          restoreMailboxes: false, restoreTrustedImageSenders: false,
-         restoreBlacklist: blacklist, restoreAiAutonomy: aiAutonomy);
+         restoreBlacklist: blacklist, restoreAiAutonomy: aiAutonomy, restoreAiResultCache: aiResultCache);
 
       foreach (var name in AllStoreFiles)
       {

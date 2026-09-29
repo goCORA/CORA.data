@@ -39,6 +39,8 @@
     <Compile Include="..\..\..\CORA.App\Services\AI\AiConsent.cs" Link="App\Linked\AiConsent.cs" />
     <Compile Include="..\..\..\CORA.App\Services\AI\MailBodyText.cs" Link="App\Linked\MailBodyText.cs" />
     <Compile Include="..\..\..\CORA.App\Services\AI\EmailActionRiskDecider.cs" Link="App\Linked\EmailActionRiskDecider.cs" />
+    <Compile Include="..\..\..\CORA.App\Services\AI\StructuredAiResults.cs" Link="App\Linked\StructuredAiResults.cs" />
+    <Compile Include="..\..\..\CORA.App\Services\AI\AiErrorMessages.cs" Link="App\Linked\AiErrorMessages.cs" />
   </ItemGroup>
 
 </Project>
