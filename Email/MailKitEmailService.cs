@@ -266,6 +266,21 @@ public class MailKitEmailService : IEmailService
                 },
             };
 
+            // User-created, client-only folders (no server counterpart for POP3).
+            var customFolders = await _syncStore.GetCustomFoldersAsync(accountKey, cancellationToken).ConfigureAwait(false);
+            foreach (var customFolder in customFolders)
+            {
+                var customSummaries = await _syncStore.GetCachedSummariesAsync(accountKey, customFolder, cancellationToken)
+                    .ConfigureAwait(false);
+                pop3Result.Add(new MailFolderInfo
+                {
+                    FullName = customFolder,
+                    Name = customFolder,
+                    Total = customSummaries.Count,
+                    Unread = customSummaries.Count(s => !s.IsRead),
+                });
+            }
+
             await _syncStore.UpsertFoldersAsync(accountKey, pop3Result, cancellationToken).ConfigureAwait(false);
             return pop3Result;
         }
@@ -327,6 +342,84 @@ public class MailKitEmailService : IEmailService
 
         return result;
     }
+
+    public async Task CreateFolderAsync(string name, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            throw new ArgumentException("Folder name must not be empty.", nameof(name));
+
+        var trimmedName = name.Trim();
+        var account = RequireAccount();
+
+        if (IsReservedFolderName(trimmedName))
+            throw new InvalidOperationException("A folder with this name already exists.");
+
+        if (account.IsPop3)
+        {
+            var accountKey = AccountKey(account);
+            var existing = await _syncStore.GetCustomFoldersAsync(accountKey, cancellationToken).ConfigureAwait(false);
+            if (existing.Any(f => f.Equals(trimmedName, StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidOperationException("A folder with this name already exists.");
+
+            await _syncStore.AddCustomFolderAsync(accountKey, trimmedName, cancellationToken).ConfigureAwait(false);
+            OnFoldersChanged();
+            return;
+        }
+
+        using var imap = await ConnectImapAsync(account, cancellationToken).ConfigureAwait(false);
+        var personal = imap.GetFolder(imap.PersonalNamespaces[0]);
+        await personal.CreateAsync(trimmedName, isMessageFolder: true, cancellationToken).ConfigureAwait(false);
+        await imap.DisconnectAsync(true, cancellationToken).ConfigureAwait(false);
+
+        OnFoldersChanged();
+    }
+
+    public async Task DeleteFolderAsync(string folderFullName, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(folderFullName))
+            throw new ArgumentException("Folder full name must not be empty.", nameof(folderFullName));
+
+        var account = RequireAccount();
+
+        if (IsReservedFolderName(folderFullName))
+            throw new NotSupportedException("This folder is required by the app and cannot be deleted.");
+
+        if (account.IsPop3)
+        {
+            var accountKey = AccountKey(account);
+
+            // Relocate any cached messages still filed under this custom folder to Trash
+            // first, so deleting the folder never silently loses locally-cached mail.
+            var summaries = await _syncStore.GetCachedSummariesAsync(accountKey, folderFullName, cancellationToken)
+                .ConfigureAwait(false);
+            foreach (var summary in summaries)
+                await _syncStore.MoveLocalMessageAsync(accountKey, folderFullName, TrashFolderName, summary.Uidl, cancellationToken)
+                    .ConfigureAwait(false);
+
+            await _syncStore.RemoveCustomFolderAsync(accountKey, folderFullName, cancellationToken).ConfigureAwait(false);
+            OnFoldersChanged();
+            return;
+        }
+
+        using var imap = await ConnectImapAsync(account, cancellationToken).ConfigureAwait(false);
+        var folder = await imap.GetFolderAsync(folderFullName, cancellationToken).ConfigureAwait(false);
+        if (folder.IsOpen)
+            await folder.CloseAsync(false, cancellationToken).ConfigureAwait(false);
+        await folder.DeleteAsync(cancellationToken).ConfigureAwait(false);
+        await imap.DisconnectAsync(true, cancellationToken).ConfigureAwait(false);
+
+        OnFoldersChanged();
+    }
+
+    /// <summary>
+    /// True for folder names that are reserved by the app (the always-present virtual/system
+    /// folders) and so may not be used for a new custom folder or targeted for deletion.
+    /// </summary>
+    private static bool IsReservedFolderName(string folderFullName) =>
+        folderFullName.Equals("INBOX", StringComparison.OrdinalIgnoreCase) ||
+        folderFullName.Equals(SentFolderName, StringComparison.OrdinalIgnoreCase) ||
+        folderFullName.Equals(TrashFolderName, StringComparison.OrdinalIgnoreCase) ||
+        folderFullName.Equals("Junk", StringComparison.OrdinalIgnoreCase);
 
     public async Task<IReadOnlyList<EmailSummary>> GetMessagesAsync(
         string folderFullName, int take = 50, int skip = 0, CancellationToken cancellationToken = default)

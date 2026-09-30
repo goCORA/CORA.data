@@ -58,6 +58,20 @@ public interface IEmailService
     Task<IReadOnlyList<MailFolderInfo>> GetFoldersAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Creates a new top-level folder on the server for the current (IMAP) account.
+    /// Throws <see cref="NotSupportedException"/> for POP3 accounts, which have no
+    /// server-side folders.
+    /// </summary>
+    Task CreateFolderAsync(string name, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Deletes the given folder from the server for the current (IMAP) account. Refuses to
+    /// delete well-known system/virtual folders (Inbox, Sent, Junk, Trash). Throws
+    /// <see cref="NotSupportedException"/> for POP3 accounts, which have no server-side folders.
+    /// </summary>
+    Task DeleteFolderAsync(string folderFullName, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Returns the last-known folder list for the current account from the local cache,
     /// without contacting the server. Used to populate the Shell flyout instantly when an
     /// account is expanded; callers should follow up with <see cref="GetFoldersAsync"/> to

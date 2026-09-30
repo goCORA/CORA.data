@@ -18,6 +18,7 @@ public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
     private readonly ILiteCollection<DeletedUidlDoc> _deletedUidls;
     private readonly ILiteCollection<MessageBodyDoc> _bodies;
     private readonly ILiteCollection<FolderInfoDoc> _folders;
+    private readonly ILiteCollection<CustomFolderDoc> _customFolders;
     private readonly string _attachmentsRoot;
     // Tracks (accountKey, folder) pairs already checked for duplicate uids this process,
     // so the full-collection repair scan runs at most once per folder per app run instead
@@ -42,6 +43,9 @@ public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
 
         _folders = _file.Database.GetCollection<FolderInfoDoc>("FolderInfos");
         _folders.EnsureIndex(f => f.AccountKey);
+
+        _customFolders = _file.Database.GetCollection<CustomFolderDoc>("CustomFolders");
+        _customFolders.EnsureIndex(f => f.AccountKey);
 
         _attachmentsRoot = attachmentsRoot;
         Directory.CreateDirectory(_attachmentsRoot);
@@ -623,6 +627,7 @@ public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
             _bodies.DeleteMany(b => b.AccountKey == accountKey);
             _deletedUidls.DeleteMany(d => d.AccountKey == accountKey);
             _folders.DeleteMany(f => f.AccountKey == accountKey);
+            _customFolders.DeleteMany(f => f.AccountKey == accountKey);
 
             // Forget per-process bookkeeping so a later re-add of the same address starts clean.
             var prefix = accountKey + "|";
@@ -650,6 +655,43 @@ public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
         var chars = value.Select(c => invalid.Contains(c) ? '_' : c).ToArray();
         var result = new string(chars);
         return string.IsNullOrWhiteSpace(result) ? "_" : result;
+    }
+
+    public Task AddCustomFolderAsync(
+        string accountKey, string folderFullName, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            var id = string.Join("|", accountKey, folderFullName);
+            _customFolders.Upsert(new CustomFolderDoc
+            {
+                Id = id,
+                AccountKey = accountKey,
+                FolderFullName = folderFullName,
+            });
+        }, cancellationToken);
+
+    public Task RemoveCustomFolderAsync(
+        string accountKey, string folderFullName, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            var id = string.Join("|", accountKey, folderFullName);
+            _customFolders.Delete(id);
+        }, cancellationToken);
+
+    public Task<List<string>> GetCustomFoldersAsync(
+        string accountKey, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+            _customFolders.Find(f => f.AccountKey == accountKey)
+                .Select(f => f.FolderFullName)
+                .ToList(),
+        cancellationToken);
+
+    private sealed class CustomFolderDoc
+    {
+        [BsonId]
+        public string Id { get; set; } = string.Empty;
+        public string AccountKey { get; set; } = string.Empty;
+        public string FolderFullName { get; set; } = string.Empty;
     }
 
     private sealed class MailSummaryDoc

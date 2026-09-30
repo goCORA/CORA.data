@@ -205,4 +205,23 @@ public interface IMailSyncStore
     /// address; it is normalized to the same key the other methods are given.
     /// </summary>
     Task DeleteAccountDataAsync(string emailAddress, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Records a user-created, client-only folder for a POP3 account (there is no server
+    /// to create it on). Used alongside the always-present virtual folders (Inbox, Junk,
+    /// Sent, Trash) so the user can organize cached mail into their own folders.
+    /// </summary>
+    Task AddCustomFolderAsync(
+        string accountKey, string folderFullName, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Removes a previously-created custom local folder's entry. Does not itself touch any
+    /// cached messages still filed under it; callers should relocate those first.
+    /// </summary>
+    Task RemoveCustomFolderAsync(
+        string accountKey, string folderFullName, CancellationToken cancellationToken = default);
+
+    /// <summary>Returns all custom local folder names previously created for the given account.</summary>
+    Task<List<string>> GetCustomFoldersAsync(
+        string accountKey, CancellationToken cancellationToken = default);
 }
