@@ -209,18 +209,26 @@ public class MailKitEmailService : IEmailService
             CurrentAccount = null;
     }
 
+    public Task<IReadOnlyList<MailFolderInfo>> GetCachedFoldersAsync(
+        CancellationToken cancellationToken = default) =>
+        GetCachedFoldersAsync(RequireAccount(), cancellationToken);
+
     public async Task<IReadOnlyList<MailFolderInfo>> GetCachedFoldersAsync(
-        CancellationToken cancellationToken = default)
+        MailAccount account, CancellationToken cancellationToken = default)
     {
-        var account = RequireAccount();
+        ArgumentNullException.ThrowIfNull(account);
         var accountKey = AccountKey(account);
         return await _syncStore.GetCachedFoldersAsync(accountKey, cancellationToken).ConfigureAwait(false);
     }
 
+    public Task<IReadOnlyList<MailFolderInfo>> GetFoldersAsync(
+        CancellationToken cancellationToken = default) =>
+        GetFoldersAsync(RequireAccount(), cancellationToken);
+
     public async Task<IReadOnlyList<MailFolderInfo>> GetFoldersAsync(
-        CancellationToken cancellationToken = default)
+        MailAccount account, CancellationToken cancellationToken = default)
     {
-        var account = RequireAccount();
+        ArgumentNullException.ThrowIfNull(account);
 
         if (account.IsPop3)
         {
@@ -406,6 +414,50 @@ public class MailKitEmailService : IEmailService
         if (folder.IsOpen)
             await folder.CloseAsync(false, cancellationToken).ConfigureAwait(false);
         await folder.DeleteAsync(cancellationToken).ConfigureAwait(false);
+        await imap.DisconnectAsync(true, cancellationToken).ConfigureAwait(false);
+
+        OnFoldersChanged();
+    }
+
+    public async Task RenameFolderAsync(string folderFullName, string newName, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(folderFullName))
+            throw new ArgumentException("Folder full name must not be empty.", nameof(folderFullName));
+        if (string.IsNullOrWhiteSpace(newName))
+            throw new ArgumentException("New folder name must not be empty.", nameof(newName));
+
+        var trimmedName = newName.Trim();
+        var account = RequireAccount();
+
+        if (IsReservedFolderName(folderFullName))
+            throw new NotSupportedException("This folder is required by the app and cannot be renamed.");
+        if (IsReservedFolderName(trimmedName))
+            throw new InvalidOperationException("A folder with this name already exists.");
+
+        if (string.Equals(folderFullName, trimmedName, StringComparison.Ordinal))
+            return;
+
+        if (account.IsPop3)
+        {
+            var accountKey = AccountKey(account);
+            var existing = await _syncStore.GetCustomFoldersAsync(accountKey, cancellationToken).ConfigureAwait(false);
+            if (!existing.Any(f => f.Equals(folderFullName, StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidOperationException("Folder not found.");
+            if (existing.Any(f => f.Equals(trimmedName, StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidOperationException("A folder with this name already exists.");
+
+            await _syncStore.RenameCustomFolderAsync(accountKey, folderFullName, trimmedName, cancellationToken)
+                .ConfigureAwait(false);
+            OnFoldersChanged();
+            return;
+        }
+
+        using var imap = await ConnectImapAsync(account, cancellationToken).ConfigureAwait(false);
+        var folder = await imap.GetFolderAsync(folderFullName, cancellationToken).ConfigureAwait(false);
+        var parent = folder.ParentFolder ?? imap.GetFolder(imap.PersonalNamespaces[0]);
+        if (folder.IsOpen)
+            await folder.CloseAsync(false, cancellationToken).ConfigureAwait(false);
+        await folder.RenameAsync(parent, trimmedName, cancellationToken).ConfigureAwait(false);
         await imap.DisconnectAsync(true, cancellationToken).ConfigureAwait(false);
 
         OnFoldersChanged();

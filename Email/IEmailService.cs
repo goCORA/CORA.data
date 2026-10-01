@@ -58,6 +58,15 @@ public interface IEmailService
     Task<IReadOnlyList<MailFolderInfo>> GetFoldersAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Same as <see cref="GetFoldersAsync(CancellationToken)"/> but fetches folders for the
+    /// given account explicitly, without relying on (or mutating) <see cref="CurrentAccount"/>.
+    /// Use this when fetching folders for an account that may not be the active one (e.g. to
+    /// populate a multi-account flyout), so concurrent fetches for different accounts cannot
+    /// race on the shared current-account state.
+    /// </summary>
+    Task<IReadOnlyList<MailFolderInfo>> GetFoldersAsync(MailAccount account, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Creates a new top-level folder on the server for the current (IMAP) account.
     /// Throws <see cref="NotSupportedException"/> for POP3 accounts, which have no
     /// server-side folders.
@@ -72,12 +81,27 @@ public interface IEmailService
     Task DeleteFolderAsync(string folderFullName, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Renames the given folder. For IMAP accounts this renames the folder on the server.
+    /// For POP3 accounts only user-created custom folders may be renamed (there is no
+    /// server to rename them on); the app's cached messages under that folder are moved
+    /// along with the rename. Refuses to rename well-known system/virtual folders
+    /// (Inbox, Sent, Junk, Trash).
+    /// </summary>
+    Task RenameFolderAsync(string folderFullName, string newName, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Returns the last-known folder list for the current account from the local cache,
     /// without contacting the server. Used to populate the Shell flyout instantly when an
     /// account is expanded; callers should follow up with <see cref="GetFoldersAsync"/> to
     /// refresh the list in the background.
     /// </summary>
     Task<IReadOnlyList<MailFolderInfo>> GetCachedFoldersAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Same as <see cref="GetCachedFoldersAsync(CancellationToken)"/> but reads the cache for
+    /// the given account explicitly, without relying on <see cref="CurrentAccount"/>.
+    /// </summary>
+    Task<IReadOnlyList<MailFolderInfo>> GetCachedFoldersAsync(MailAccount account, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Returns the message list for the given folder. Both POP3 and IMAP accounts read

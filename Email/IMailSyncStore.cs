@@ -221,6 +221,14 @@ public interface IMailSyncStore
     Task RemoveCustomFolderAsync(
         string accountKey, string folderFullName, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Renames a previously-created custom local folder, migrating its entry plus every
+    /// cached summary, body, and delete tombstone filed under the old folder name over to
+    /// the new one (their storage keys embed the folder name).
+    /// </summary>
+    Task RenameCustomFolderAsync(
+        string accountKey, string oldFolderFullName, string newFolderFullName, CancellationToken cancellationToken = default);
+
     /// <summary>Returns all custom local folder names previously created for the given account.</summary>
     Task<List<string>> GetCustomFoldersAsync(
         string accountKey, CancellationToken cancellationToken = default);

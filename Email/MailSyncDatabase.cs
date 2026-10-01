@@ -678,6 +678,53 @@ public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
             _customFolders.Delete(id);
         }, cancellationToken);
 
+    public Task RenameCustomFolderAsync(
+        string accountKey, string oldFolderFullName, string newFolderFullName, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            var oldId = string.Join("|", accountKey, oldFolderFullName);
+            var newId = string.Join("|", accountKey, newFolderFullName);
+            var customFolder = _customFolders.FindById(oldId);
+            if (customFolder is not null)
+            {
+                _customFolders.Delete(oldId);
+                customFolder.Id = newId;
+                customFolder.FolderFullName = newFolderFullName;
+                _customFolders.Upsert(customFolder);
+            }
+
+            foreach (var summary in _summaries.Find(s => s.AccountKey == accountKey && s.FolderName == oldFolderFullName).ToList())
+            {
+                _summaries.Delete(summary.Id);
+                summary.Id = MakeKey(accountKey, newFolderFullName, summary.Uidl);
+                summary.FolderName = newFolderFullName;
+                _summaries.Upsert(summary);
+            }
+
+            foreach (var body in _bodies.Find(b => b.AccountKey == accountKey && b.FolderName == oldFolderFullName).ToList())
+            {
+                _bodies.Delete(body.Id);
+                body.Id = MakeKey(accountKey, newFolderFullName, body.Uidl);
+                body.FolderName = newFolderFullName;
+                _bodies.Upsert(body);
+            }
+
+            foreach (var tombstone in _deletedUidls.Find(d => d.AccountKey == accountKey && d.FolderName == oldFolderFullName).ToList())
+            {
+                _deletedUidls.Delete(tombstone.Id);
+                tombstone.Id = MakeKey(accountKey, newFolderFullName, tombstone.Uidl);
+                tombstone.FolderName = newFolderFullName;
+                _deletedUidls.Upsert(tombstone);
+            }
+
+            // Forget per-process uid-counter/repair bookkeeping keyed on the old folder name
+            // so it is reseeded fresh under the new name.
+            var oldCounterPrefix = string.Join("|", accountKey, oldFolderFullName) + "|";
+            foreach (var key in _uidCounters.Keys.Where(k => k.StartsWith(oldCounterPrefix, StringComparison.OrdinalIgnoreCase)).ToList())
+                _uidCounters.TryRemove(key, out _);
+            _repairedFolders.TryRemove(MakeKey(accountKey, oldFolderFullName, "__dupe-check__"), out _);
+        }, cancellationToken);
+
     public Task<List<string>> GetCustomFoldersAsync(
         string accountKey, CancellationToken cancellationToken = default) =>
         Task.Run(() =>
