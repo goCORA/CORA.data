@@ -32,6 +32,34 @@ public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
     {
         _file = EncryptedLiteDbFile.Open(path);
 
+        // Once all bodies have been compressed (see CompressExistingBodies), the next start gives
+        // the space they used back. Must run before any collection is taken from the database.
+        var compactBackup = path + ".before-compact.bak";
+        if (ReadMeta(MetaCompactPending))
+        {
+            try
+            {
+                // Safety copy of the (still encrypted) file as it was, kept until the next start
+                // has opened the compacted store successfully. Wiping all data deletes it too
+                // (it is named after the store file).
+                if (File.Exists(path))
+                    File.Copy(path, compactBackup, overwrite: true);
+                var (before, after) = _file.Compact();
+                System.Diagnostics.Debug.WriteLine($"[MailSync] compacted {before / 1048576.0:F1} MB -> {after / 1048576.0:F1} MB");
+                WriteMeta(MetaCompactPending, false);
+            }
+            catch (Exception ex)
+            {
+                // The database is unchanged; it simply stays larger. Try again next start.
+                System.Diagnostics.Debug.WriteLine($"[MailSync] compaction failed: {ex.Message}");
+            }
+        }
+        else if (File.Exists(compactBackup))
+        {
+            // The compacted store opened fine on a later start: the safety copy is no longer needed.
+            try { File.Delete(compactBackup); } catch (Exception) { }
+        }
+
         _summaries = _file.Database.GetCollection<MailSummaryDoc>("MailSummaries");
         _summaries.EnsureIndex(s => s.AccountKey);
         _summaries.EnsureIndex(s => s.FolderName);
@@ -53,9 +81,155 @@ public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
 
         _attachmentsRoot = attachmentsRoot;
         Directory.CreateDirectory(_attachmentsRoot);
+
+        if (!ReadMeta(MetaBodiesCompressed))
+            _ = Task.Run(CompressExistingBodies);
+
+#if DEBUG
+        _ = Task.Run(() => LogSizeBreakdown(path));
+#endif
     }
 
+#if DEBUG
+    /// <summary>
+    /// Debug builds only: writes what the mail cache file is made of to the Output window
+    /// (filter on "[DbSize]"), per collection and per account/folder, to decide how to shrink it.
+    /// </summary>
+    private void LogSizeBreakdown(string path)
+    {
+        try
+        {
+            var started = System.Diagnostics.Stopwatch.StartNew();
+            var fileBytes = File.Exists(path) ? new FileInfo(path).Length : 0;
+            System.Diagnostics.Debug.WriteLine($"[DbSize] file on disk: {fileBytes / 1048576.0:F1} MB");
+
+            long total = 0;
+            foreach (var name in _file.Database.GetCollectionNames().OrderBy(n => n))
+            {
+                long bytes = 0, count = 0;
+                foreach (var doc in _file.Database.GetCollection(name).FindAll())
+                {
+                    bytes += BsonSerializer.Serialize(doc).Length;
+                    count++;
+                }
+                total += bytes;
+                System.Diagnostics.Debug.WriteLine($"[DbSize] {name}: {count} docs, {bytes / 1048576.0:F1} MB");
+            }
+            System.Diagnostics.Debug.WriteLine($"[DbSize] all documents: {total / 1048576.0:F1} MB (the rest of the file is indexes and free space)");
+
+            // Bodies by account/folder, biggest first, and how much of them is HTML.
+            var byFolder = new Dictionary<string, (long Count, long Bytes, long Html, long Text)>();
+            foreach (var doc in _file.Database.GetCollection("MessageBodies").FindAll())
+            {
+                var key = $"{doc["AccountKey"].AsString} / {doc["FolderName"].AsString}";
+                var html = doc["HtmlBody"].IsString ? doc["HtmlBody"].AsString.Length : 0;
+                var text = doc["TextBody"].IsString ? doc["TextBody"].AsString.Length : 0;
+                byFolder.TryGetValue(key, out var v);
+                byFolder[key] = (v.Count + 1, v.Bytes + BsonSerializer.Serialize(doc).Length, v.Html + html, v.Text + text);
+            }
+            foreach (var (key, v) in byFolder.OrderByDescending(kv => kv.Value.Bytes).Take(25))
+                System.Diagnostics.Debug.WriteLine(
+                    $"[DbSize] bodies {key}: {v.Count} messages, {v.Bytes / 1048576.0:F1} MB (HTML {v.Html / 1048576.0:F1} M chars, text {v.Text / 1048576.0:F1} M chars)");
+
+            System.Diagnostics.Debug.WriteLine($"[DbSize] done in {started.ElapsedMilliseconds} ms");
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[DbSize] failed: {ex.Message}");
+        }
+    }
+#endif
+
     public void Dispose() => _file.Dispose();
+
+    // --- Body compression --------------------------------------------------------------------
+    // Message bodies (mostly HTML) were by far the largest part of this store, and the whole
+    // store is re-encrypted and rewritten on every save. They are now kept Brotli-compressed in
+    // HtmlBodyZ/TextBodyZ (typically a fifth to a tenth of the size); compression happens before
+    // the store is encrypted, so nothing on disk is less protected. Older rows that still hold
+    // plain HtmlBody/TextBody are read as they are and converted once in the background.
+
+    private const string MetaBodiesCompressed = "BodiesCompressed";
+    private const string MetaCompactPending = "CompactPending";
+
+    private bool ReadMeta(string key)
+    {
+        var doc = _file.Database.GetCollection("Meta").FindById(key);
+        return doc is not null && doc["Value"].IsBoolean && doc["Value"].AsBoolean;
+    }
+
+    private void WriteMeta(string key, bool value) =>
+        _file.Database.GetCollection("Meta").Upsert(new BsonDocument { ["_id"] = key, ["Value"] = value });
+
+    internal static byte[]? PackText(string? text)
+    {
+        if (text is null)
+            return null;
+        var bytes = System.Text.Encoding.UTF8.GetBytes(text);
+        using var output = new MemoryStream(bytes.Length / 4 + 16);
+        using (var brotli = new System.IO.Compression.BrotliStream(output, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
+            brotli.Write(bytes, 0, bytes.Length);
+        return output.ToArray();
+    }
+
+    internal static string? UnpackText(byte[]? packed, string? legacy)
+    {
+        if (packed is null)
+            return legacy;
+        try
+        {
+            using var input = new MemoryStream(packed);
+            using var brotli = new System.IO.Compression.BrotliStream(input, System.IO.Compression.CompressionMode.Decompress);
+            using var output = new MemoryStream(packed.Length * 4);
+            brotli.CopyTo(output);
+            return System.Text.Encoding.UTF8.GetString(output.GetBuffer(), 0, (int)output.Length);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or InvalidOperationException)
+        {
+            // A damaged entry must not stop the message from opening at all: show what we have.
+            System.Diagnostics.Debug.WriteLine($"[MailSync] could not decompress a stored body: {ex.Message}");
+            return legacy;
+        }
+    }
+
+    /// <summary>
+    /// One-time background conversion of bodies stored before compression existed. Each row is
+    /// re-read and updated on its own (Update, never Upsert), so a row that was moved or deleted
+    /// meanwhile is simply skipped. When done, the next start compacts the store.
+    /// </summary>
+    private void CompressExistingBodies()
+    {
+        try
+        {
+            var started = System.Diagnostics.Stopwatch.StartNew();
+            var ids = _bodies.Query()
+                .Where(b => b.HtmlBody != null || b.TextBody != null)
+                .Select(b => b.Id)
+                .ToList();
+
+            foreach (var id in ids)
+            {
+                var doc = _bodies.FindById(id);
+                if (doc is null || (doc.HtmlBody is null && doc.TextBody is null))
+                    continue;
+                doc.HtmlBodyZ ??= PackText(doc.HtmlBody);
+                doc.TextBodyZ ??= PackText(doc.TextBody);
+                doc.HtmlBody = null;
+                doc.TextBody = null;
+                _bodies.Update(doc);
+            }
+
+            WriteMeta(MetaBodiesCompressed, true);
+            if (ids.Count > 0)
+                WriteMeta(MetaCompactPending, true);
+            System.Diagnostics.Debug.WriteLine($"[MailSync] compressed {ids.Count} stored bodies in {started.ElapsedMilliseconds} ms; space is given back at the next start");
+        }
+        catch (Exception ex)
+        {
+            // Unconverted rows still read fine; the conversion is retried at the next start.
+            System.Diagnostics.Debug.WriteLine($"[MailSync] body compression failed: {ex.Message}");
+        }
+    }
 
     void IFlushableStore.Flush() => _file.Flush();
     void IFlushableStore.SuppressFlush() => _file.SuppressFlush();
@@ -551,8 +725,8 @@ public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
                 FolderName = folderFullName,
                 Uidl = uidl,
                 To = body.To,
-                TextBody = body.TextBody,
-                HtmlBody = body.HtmlBody,
+                TextBodyZ = PackText(body.TextBody),
+                HtmlBodyZ = PackText(body.HtmlBody),
                 Attachments = body.Attachments,
             });
         }, cancellationToken);
@@ -569,8 +743,8 @@ public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
             return new StoredMailBody
             {
                 To = doc.To,
-                TextBody = doc.TextBody,
-                HtmlBody = doc.HtmlBody,
+                TextBody = UnpackText(doc.TextBodyZ, doc.TextBody),
+                HtmlBody = UnpackText(doc.HtmlBodyZ, doc.HtmlBody),
                 Attachments = doc.Attachments,
             };
         }, cancellationToken);
@@ -867,8 +1041,12 @@ public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
         public string FolderName { get; set; } = string.Empty;
         public string Uidl { get; set; } = string.Empty;
         public string To { get; set; } = string.Empty;
+        // Only in rows written before bodies were compressed; see CompressExistingBodies.
         public string? TextBody { get; set; }
         public string? HtmlBody { get; set; }
+        // Brotli-compressed UTF-8 (PackText/UnpackText).
+        public byte[]? TextBodyZ { get; set; }
+        public byte[]? HtmlBodyZ { get; set; }
         public List<StoredMailAttachment> Attachments { get; set; } = [];
     }
 
