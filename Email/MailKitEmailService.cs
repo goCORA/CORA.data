@@ -303,6 +303,58 @@ public class MailKitEmailService : IEmailService
         var ordered = new List<IMailFolder> { imap.Inbox };
         ordered.AddRange(folders.Where(f => !f.FullName.Equals(imap.Inbox.FullName, StringComparison.OrdinalIgnoreCase)));
 
+        // Providers such as Gmail keep their system folders under a non-selectable container
+        // ("[Gmail]"), which the non-recursive listing above never descends into. Look inside
+        // such containers for the server's own Sent folder (the \Sent special-use flag, so
+        // localized names work) and list it too. It syncs like any other IMAP folder; the local
+        // virtual "Sent" folder appended below is unaffected.
+        // Folders flagged \Sent by the server win; the name guess is only a fallback for servers that
+        // don't send the flag, so a stray "Sent Items" label can't be listed next to the real one.
+        var flaggedSent = new List<IMailFolder>();
+        var namedSent = new List<IMailFolder>();
+        foreach (var container in folders.Where(f => (f.Attributes & FolderAttributes.HasNoChildren) == 0))
+        {
+            try
+            {
+                var children = await container.GetSubfoldersAsync(false, cancellationToken).ConfigureAwait(false);
+                foreach (var child in children)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[Folders] {container.FullName} / {child.FullName} attrs={child.Attributes}");
+                    if (ordered.Any(o => o.FullName.Equals(child.FullName, StringComparison.OrdinalIgnoreCase)))
+                        continue;
+                    if ((child.Attributes & FolderAttributes.Sent) != 0)
+                        flaggedSent.Add(child);
+                    else if (child.Name.Equals("Sent Mail", StringComparison.OrdinalIgnoreCase)
+                             || child.Name.Equals("Sent Items", StringComparison.OrdinalIgnoreCase))
+                        namedSent.Add(child);
+                }
+            }
+            catch (Exception ex)
+            {
+                // A container we can't enumerate just contributes nothing.
+                System.Diagnostics.Debug.WriteLine($"[Folders] could not list {container.FullName}: {ex.Message}");
+            }
+        }
+
+        var serverSentFound = flaggedSent.Count > 0 || namedSent.Count > 0;
+        ordered.AddRange(flaggedSent.Count > 0 ? flaggedSent : namedSent.Take(1));
+
+        // Second try: ask the server for its Sent special-use folder directly.
+        if (!serverSentFound)
+        {
+            try
+            {
+                var special = imap.GetFolder(SpecialFolder.Sent);
+                if (special is not null
+                    && !ordered.Any(o => o.FullName.Equals(special.FullName, StringComparison.OrdinalIgnoreCase)))
+                    ordered.Add(special);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[Folders] no special-use Sent folder: {ex.Message}");
+            }
+        }
+
         foreach (var folder in ordered)
         {
             if ((folder.Attributes & FolderAttributes.NonExistent) != 0)
@@ -323,9 +375,10 @@ public class MailKitEmailService : IEmailService
                 });
                 await folder.CloseAsync(false, cancellationToken).ConfigureAwait(false);
             }
-            catch
+            catch (Exception ex)
             {
                 // Skip folders that cannot be opened (e.g. \Noselect).
+                System.Diagnostics.Debug.WriteLine($"[Folders] skipped {folder.FullName}: {ex.Message}");
             }
         }
 
