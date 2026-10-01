@@ -160,6 +160,17 @@ public interface IMailSyncStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// After the server moved a message to another folder and reported its new UID there (IMAP
+    /// UIDPLUS), moves the cached summary and body to the destination folder under that UID, so
+    /// the message shows there at once instead of being downloaded again by the next sync. The
+    /// row stays a normal server-synced row (not local-only), and the source folder gets a
+    /// tombstone exactly as <see cref="DeleteAsync"/> would leave.
+    /// </summary>
+    Task MoveSyncedMessageAsync(
+        string accountKey, string sourceFolderFullName, string sourceUidl,
+        string destinationFolderFullName, uint destinationUid, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Remembers, per account, that the user moved these messages (by Message-Id) into the Inbox
     /// themselves, so auto-junk never moves them out again even if the sender is still blocked.
     /// Message-Ids are used because the move gives the message a new server UID. Blank ids are ignored.

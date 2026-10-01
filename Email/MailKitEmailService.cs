@@ -1904,7 +1904,7 @@ public class MailKitEmailService : IEmailService
         }
 
         var uniqueIds = new UniqueIdSet(uidList.Select(uid => new UniqueId(uid)));
-        await sourceFolder.MoveToAsync(uniqueIds, destinationFolder, cancellationToken).ConfigureAwait(false);
+        var uidMap = await sourceFolder.MoveToAsync(uniqueIds, destinationFolder, cancellationToken).ConfigureAwait(false);
 
         await sourceFolder.CloseAsync(false, cancellationToken).ConfigureAwait(false);
         await imap.DisconnectAsync(true, cancellationToken).ConfigureAwait(false);
@@ -1912,9 +1912,30 @@ public class MailKitEmailService : IEmailService
         var syncAccountKey = AccountKey(account);
         if (rescueMessageIds.Count > 0)
             await _syncStore.MarkRescuedAsync(syncAccountKey, rescueMessageIds, cancellationToken).ConfigureAwait(false);
-        foreach (var uid in uidList)
-            await _syncStore.DeleteAsync(syncAccountKey, sourceFolderFullName, uid.ToString(), cancellationToken).ConfigureAwait(false);
+        await MoveCachedRowsAfterServerMoveAsync(syncAccountKey, sourceFolderFullName, destinationFolder.FullName, uidList, uidMap, cancellationToken)
+            .ConfigureAwait(false);
         OnFoldersChanged();
+    }
+
+    /// <summary>
+    /// Updates the local cache after a server move. Messages whose new UID the server reported
+    /// (UIDPLUS, which Gmail and most servers support) keep their cached summary and body and are
+    /// filed under the destination folder at once; the rest are removed here and arrive with the
+    /// destination folder's next sync, as before.
+    /// </summary>
+    private async Task MoveCachedRowsAfterServerMoveAsync(
+        string accountKey, string sourceFolderFullName, string destinationFolderFullName,
+        IReadOnlyCollection<uint> uids, UniqueIdMap? uidMap, CancellationToken cancellationToken)
+    {
+        foreach (var uid in uids)
+        {
+            if (uidMap is not null && uidMap.TryGetValue(new UniqueId(uid), out var destinationId))
+                await _syncStore.MoveSyncedMessageAsync(accountKey, sourceFolderFullName, uid.ToString(),
+                    destinationFolderFullName, destinationId.Id, cancellationToken).ConfigureAwait(false);
+            else
+                await _syncStore.DeleteAsync(accountKey, sourceFolderFullName, uid.ToString(), cancellationToken)
+                    .ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -1975,8 +1996,9 @@ public class MailKitEmailService : IEmailService
             .ConfigureAwait(false);
 
         var uniqueIds = new UniqueIdSet(uidList.Select(uid => new UniqueId(uid)));
-        await sourceFolder.MoveToAsync(uniqueIds, imap.Inbox, cancellationToken)
+        var uidMap = await sourceFolder.MoveToAsync(uniqueIds, imap.Inbox, cancellationToken)
             .ConfigureAwait(false);
+        var inboxFullName = imap.Inbox.FullName;
 
         await sourceFolder.CloseAsync(false, cancellationToken).ConfigureAwait(false);
         await imap.DisconnectAsync(true, cancellationToken).ConfigureAwait(false);
@@ -1984,9 +2006,8 @@ public class MailKitEmailService : IEmailService
         var inboxAccountKey = AccountKey(account);
         if (rescueMessageIds.Count > 0)
             await _syncStore.MarkRescuedAsync(inboxAccountKey, rescueMessageIds, cancellationToken).ConfigureAwait(false);
-        foreach (var uid in uidList)
-            await _syncStore.DeleteAsync(inboxAccountKey, folderFullName, uid.ToString(), cancellationToken)
-                .ConfigureAwait(false);
+        await MoveCachedRowsAfterServerMoveAsync(inboxAccountKey, folderFullName, inboxFullName, uidList, uidMap, cancellationToken)
+            .ConfigureAwait(false);
         OnFoldersChanged();
     }
 

@@ -357,6 +357,50 @@ public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
             }
         }, cancellationToken);
 
+    public Task MoveSyncedMessageAsync(
+        string accountKey, string sourceFolderFullName, string sourceUidl,
+        string destinationFolderFullName, uint destinationUid, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            var sourceId = MakeKey(accountKey, sourceFolderFullName, sourceUidl);
+            var destUidl = destinationUid.ToString();
+            var destId = MakeKey(accountKey, destinationFolderFullName, destUidl);
+
+            var summary = _summaries.FindById(sourceId);
+            if (summary is not null)
+            {
+                _summaries.Delete(sourceId);
+                summary.Id = destId;
+                summary.FolderName = destinationFolderFullName;
+                summary.Uid = destinationUid;
+                summary.Uidl = destUidl;
+                summary.IsLocalOnly = false;
+                _summaries.Upsert(summary);
+            }
+
+            var body = _bodies.FindById(sourceId);
+            if (body is not null)
+            {
+                _bodies.Delete(sourceId);
+                body.Id = destId;
+                body.FolderName = destinationFolderFullName;
+                body.Uidl = destUidl;
+                _bodies.Upsert(body);
+            }
+
+            // The destination row is a real server message now; never let a stale tombstone hide it.
+            _deletedUidls.Delete(destId);
+
+            // Same as DeleteAsync: the source folder must not re-add the message on its next sync.
+            _deletedUidls.Upsert(new DeletedUidlDoc
+            {
+                Id = sourceId,
+                AccountKey = accountKey,
+                FolderName = sourceFolderFullName,
+                Uidl = sourceUidl,
+            });
+        }, cancellationToken);
+
     public Task MoveLocalMessageAsync(
         string accountKey, string sourceFolderFullName, string destinationFolderFullName, string uidl,
         CancellationToken cancellationToken = default) =>
