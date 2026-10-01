@@ -750,6 +750,25 @@ public class MailKitEmailService : IEmailService
         return cached.Count;
     }
 
+    // Per account+folder coalescing of syncs; see SyncFolderAsync.
+    private sealed class FolderSyncState
+    {
+        public readonly SemaphoreSlim Gate = new(1, 1);
+        public long Requested;
+        public long CompletedFor;
+        public bool LastResult;
+    }
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, FolderSyncState> _folderSyncStates =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Syncs one folder with the server. Only one sync of a given account+folder runs at a time:
+    /// two overlapping syncs (e.g. the user leaves the Inbox and comes back while its first sync
+    /// is still running) both saw the same new mail, one auto-junk moved it away, and the other
+    /// then failed fetching it ("The IMAP server did not return the requested message"). A
+    /// request is answered by the first sync that started after it was made.
+    /// </summary>
     public async Task<bool> SyncFolderAsync(
         string folderFullName, CancellationToken cancellationToken = default)
     {
@@ -759,7 +778,29 @@ public class MailKitEmailService : IEmailService
             return false;
 
         var account = RequireAccount();
+        var state = _folderSyncStates.GetOrAdd($"{AccountKey(account)}|{folderFullName}", _ => new FolderSyncState());
+        var myRequest = Interlocked.Increment(ref state.Requested);
+        await state.Gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (Interlocked.Read(ref state.CompletedFor) >= myRequest)
+                return state.LastResult;
 
+            var coversUpTo = Interlocked.Read(ref state.Requested);
+            var result = await SyncFolderCoreAsync(account, folderFullName, cancellationToken).ConfigureAwait(false);
+            state.LastResult = result;
+            Interlocked.Exchange(ref state.CompletedFor, coversUpTo);
+            return result;
+        }
+        finally
+        {
+            state.Gate.Release();
+        }
+    }
+
+    private async Task<bool> SyncFolderCoreAsync(
+        MailAccount account, string folderFullName, CancellationToken cancellationToken)
+    {
         if (!account.IsPop3)
             return await SyncImapFolderAsync(account, folderFullName, cancellationToken).ConfigureAwait(false);
 
@@ -972,7 +1013,20 @@ public class MailKitEmailService : IEmailService
 
                 // Fetch the full message so the local db can fully serve reads afterwards
                 // without reconnecting to the server.
-                var mime = await folder.GetMessageAsync(uniqueId, cancellationToken).ConfigureAwait(false);
+                MimeMessage mime;
+                try
+                {
+                    mime = await folder.GetMessageAsync(uniqueId, cancellationToken).ConfigureAwait(false);
+                }
+                catch (MessageNotFoundException)
+                {
+                    // The message was listed a moment ago but is gone now: moved or deleted in the
+                    // meantime. Gmail in particular can still list a message on a new connection
+                    // just after it was moved out (e.g. by auto-junk). Skip it instead of failing
+                    // the whole sync; if it really is still here, the next sync picks it up.
+                    System.Diagnostics.Debug.WriteLine($"[Sync] {imapFolderName}: UID {uniqueId.Id} disappeared before it could be fetched; skipped");
+                    continue;
+                }
                 var uid = uniqueId.Id;
 
                 var attachments = mime.Attachments.OfType<MimePart>().ToList();
