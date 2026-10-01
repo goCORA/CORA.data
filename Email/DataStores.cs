@@ -19,6 +19,7 @@ public interface IDataStores : IDisposable
     IAiAutonomyStore AiAutonomy { get; }
     IContactStore Contacts { get; }
     IHiddenFolderStore HiddenFolders { get; }
+    IFolderOrderStore FolderOrder { get; }
     IAiResultCacheStore AiResultCache { get; }
 
     /// <summary>
@@ -113,6 +114,7 @@ public sealed class SecureDataStores : IDataStores, IDisposable
     private readonly AiAutonomyDatabase _aiAutonomy;
     private readonly ContactDatabase _contacts;
     private readonly HiddenFolderDatabase _hiddenFolders;
+    private readonly FolderOrderDatabase _folderOrder;
     private readonly AiResultCacheDatabase _aiResultCache;
     private readonly IFlushableStore[] _flushableStores;
     private readonly string _baseDir;
@@ -132,6 +134,7 @@ public sealed class SecureDataStores : IDataStores, IDisposable
     public IAiAutonomyStore AiAutonomy => _aiAutonomy;
     public IContactStore Contacts => _contacts;
     public IHiddenFolderStore HiddenFolders => _hiddenFolders;
+    public IFolderOrderStore FolderOrder => _folderOrder;
     public IAiResultCacheStore AiResultCache => _aiResultCache;
 
     private SecureDataStores(
@@ -139,7 +142,7 @@ public sealed class SecureDataStores : IDataStores, IDisposable
         TagDatabase tags, MailSyncDatabase mailSync, AccountCredentialDatabase accounts,
         TrustedImageSenderDatabase trustedImageSenders, BlacklistDatabase blacklist,
         AiAutonomyDatabase aiAutonomy, ContactDatabase contacts, HiddenFolderDatabase hiddenFolders,
-        AiResultCacheDatabase aiResultCache)
+        FolderOrderDatabase folderOrder, AiResultCacheDatabase aiResultCache)
     {
         _baseDir = baseDir;
         _tags = tags;
@@ -150,8 +153,9 @@ public sealed class SecureDataStores : IDataStores, IDisposable
         _aiAutonomy = aiAutonomy;
         _contacts = contacts;
         _hiddenFolders = hiddenFolders;
+        _folderOrder = folderOrder;
         _aiResultCache = aiResultCache;
-        _flushableStores = [_tags, _mailSync, _accounts, _trustedImageSenders, _blacklist, _aiAutonomy, _contacts, _hiddenFolders, _aiResultCache];
+        _flushableStores = [_tags, _mailSync, _accounts, _trustedImageSenders, _blacklist, _aiAutonomy, _contacts, _hiddenFolders, _folderOrder, _aiResultCache];
 
         // Option B: background safety-net flush, so a mid-session OS kill (which never
         // gives Dispose() a chance to run) loses at most a few seconds of writes instead
@@ -401,7 +405,9 @@ public sealed class SecureDataStores : IDataStores, IDisposable
             System.Diagnostics.Debug.WriteLine($"Hidden-folder preference import failed; will retry next launch: {ex}");
         }
 
-        return new SecureDataStores(baseDir, tags, mailSync, accounts, trustedImageSenders, blacklist, aiAutonomy, contacts, hiddenFolders, aiResultCache);
+        var folderOrder = new FolderOrderDatabase(Path.Combine(baseDir, StoreFiles.FolderOrder));
+
+        return new SecureDataStores(baseDir, tags, mailSync, accounts, trustedImageSenders, blacklist, aiAutonomy, contacts, hiddenFolders, folderOrder, aiResultCache);
     }
 
     public void Dispose()
@@ -439,7 +445,7 @@ public sealed class SecureDataStores : IDataStores, IDisposable
 
         // Best-effort per store: a failed final flush in one (e.g. the atomic file replace
         // still being blocked after its retries) must not stop the others from flushing.
-        foreach (var store in (IDisposable[])[_tags, _mailSync, _accounts, _trustedImageSenders, _blacklist, _aiAutonomy, _contacts, _hiddenFolders, _aiResultCache])
+        foreach (var store in (IDisposable[])[_tags, _mailSync, _accounts, _trustedImageSenders, _blacklist, _aiAutonomy, _contacts, _hiddenFolders, _folderOrder, _aiResultCache])
         {
             try
             {

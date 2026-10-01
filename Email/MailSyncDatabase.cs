@@ -19,6 +19,7 @@ public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
     private readonly ILiteCollection<MessageBodyDoc> _bodies;
     private readonly ILiteCollection<FolderInfoDoc> _folders;
     private readonly ILiteCollection<CustomFolderDoc> _customFolders;
+    private readonly ILiteCollection<RescuedMessageDoc> _rescued;
     private readonly string _attachmentsRoot;
     // Tracks (accountKey, folder) pairs already checked for duplicate uids this process,
     // so the full-collection repair scan runs at most once per folder per app run instead
@@ -46,6 +47,9 @@ public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
 
         _customFolders = _file.Database.GetCollection<CustomFolderDoc>("CustomFolders");
         _customFolders.EnsureIndex(f => f.AccountKey);
+
+        _rescued = _file.Database.GetCollection<RescuedMessageDoc>("RescuedMessages");
+        _rescued.EnsureIndex(r => r.AccountKey);
 
         _attachmentsRoot = attachmentsRoot;
         Directory.CreateDirectory(_attachmentsRoot);
@@ -594,6 +598,7 @@ public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
                     Name = f.Name,
                     Total = f.Total,
                     Unread = f.Unread,
+                    IsJunk = f.IsJunk,
                 }).ToList(),
             });
         }, cancellationToken);
@@ -612,7 +617,43 @@ public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
                 Name = f.Name,
                 Total = f.Total,
                 Unread = f.Unread,
+                IsJunk = f.IsJunk,
             }).ToList();
+        }, cancellationToken);
+
+    // Message-Ids come back from servers and MimeKit with or without angle brackets; the key
+    // ignores them (and surrounding spaces) so the same message always matches itself.
+    internal static string NormalizeMessageId(string? messageId) =>
+        (messageId ?? string.Empty).Trim().Trim('<', '>').Trim();
+
+    public Task MarkRescuedAsync(
+        string accountKey, IEnumerable<string> messageIds, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            foreach (var messageId in messageIds.Select(NormalizeMessageId).Where(id => id.Length > 0).Distinct())
+            {
+                _rescued.Upsert(new RescuedMessageDoc
+                {
+                    Id = accountKey + "|" + messageId,
+                    AccountKey = accountKey,
+                    MessageId = messageId,
+                    RescuedUtc = DateTime.UtcNow,
+                });
+            }
+        }, cancellationToken);
+
+    public Task<HashSet<string>> GetRescuedAsync(
+        string accountKey, IEnumerable<string> messageIds, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            var found = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var messageId in messageIds.Select(NormalizeMessageId).Where(id => id.Length > 0).Distinct())
+            {
+                if (_rescued.FindById(accountKey + "|" + messageId) is not null)
+                    found.Add(messageId);
+            }
+
+            return found;
         }, cancellationToken);
 
     public Task DeleteAccountDataAsync(string emailAddress, CancellationToken cancellationToken = default) =>
@@ -628,6 +669,7 @@ public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
             _deletedUidls.DeleteMany(d => d.AccountKey == accountKey);
             _folders.DeleteMany(f => f.AccountKey == accountKey);
             _customFolders.DeleteMany(f => f.AccountKey == accountKey);
+            _rescued.DeleteMany(r => r.AccountKey == accountKey);
 
             // Forget per-process bookkeeping so a later re-add of the same address starts clean.
             var prefix = accountKey + "|";
@@ -792,6 +834,16 @@ public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
         public string Name { get; set; } = string.Empty;
         public int Total { get; set; }
         public int Unread { get; set; }
+        public bool IsJunk { get; set; }
+    }
+
+    private sealed class RescuedMessageDoc
+    {
+        [BsonId]
+        public string Id { get; set; } = string.Empty;
+        public string AccountKey { get; set; } = string.Empty;
+        public string MessageId { get; set; } = string.Empty;
+        public DateTime RescuedUtc { get; set; }
     }
 
     private sealed class FolderInfoDoc

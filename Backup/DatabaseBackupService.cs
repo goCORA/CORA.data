@@ -126,9 +126,15 @@ public sealed class DatabaseBackupService
         // Map logical selections to the filenames used in backups.
         var allowFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (restoreTags) allowFiles.Add(StoreFiles.Tags);
-        // Which folders an account hides from the menu is a per-account setting, so it travels
-        // with the accounts toggle rather than getting a switch of its own.
-        if (restoreAccounts) { allowFiles.Add(StoreFiles.Accounts); allowFiles.Add(StoreFiles.HiddenFolders); }
+        // Which folders an account hides from the menu, and in what order it lists them, are
+        // per-account settings, so they travel with the accounts toggle rather than getting a
+        // switch of their own.
+        if (restoreAccounts)
+        {
+            allowFiles.Add(StoreFiles.Accounts);
+            allowFiles.Add(StoreFiles.HiddenFolders);
+            allowFiles.Add(StoreFiles.FolderOrder);
+        }
         if (restoreContacts) allowFiles.Add(StoreFiles.Contacts);
         if (restoreMailboxes) allowFiles.Add(StoreFiles.MailSync);
         if (restoreTrustedImageSenders) allowFiles.Add(StoreFiles.TrustedImageSenders);

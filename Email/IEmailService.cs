@@ -162,7 +162,8 @@ public interface IEmailService
 
     /// <summary>
     /// Moves a message to Junk/Spam. For IMAP accounts this moves the message on the
-    /// server to a folder named "Junk", "Spam", or "Bulk Mail" (first match wins). For
+    /// server to its junk/spam folder: the one flagged \Junk by the server, else a folder with a
+    /// well-known name such as "Junk", "Junk Mail" or "Spam" (see JunkFolderDetection). For
     /// POP3 accounts, which have no server-side folders, the message is moved locally
     /// into a virtual "Junk" folder in the local cache/db (see <see cref="GetFoldersAsync"/>).
     /// </summary>
@@ -192,18 +193,27 @@ public interface IEmailService
     /// Moves multiple messages from one folder to another. For IMAP accounts this
     /// moves the messages on the server; for POP3 accounts this updates the local
     /// cache to place the message under the destination virtual folder.
+    /// <para>
+    /// A move into the Inbox that the user made themselves (<paramref name="initiatedByAi"/>
+    /// false) is remembered, so auto-junk never moves that mail out again even if its sender is
+    /// still blocked. Callers must pass true for anything the AI assistant did, and never for a
+    /// human tap (same rule as <c>IEmailActionGateway</c>).
+    /// </para>
     /// </summary>
     Task MoveMessagesAsync(
-        string sourceFolderFullName, IEnumerable<uint> uids, string destinationFolderFullName, CancellationToken cancellationToken = default);
+        string sourceFolderFullName, IEnumerable<uint> uids, string destinationFolderFullName,
+        bool initiatedByAi = false, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Moves multiple messages out of Junk/Spam back to the Inbox using a single connection
     /// for the whole batch. For POP3 accounts this moves the cached rows from the local
     /// virtual "Junk" folder back to "INBOX". For IMAP accounts this moves the messages on
-    /// the server from the current folder back to the Inbox.
+    /// the server from the current folder back to the Inbox. Unless <paramref name="initiatedByAi"/>
+    /// is true, the user's decision is remembered so auto-junk does not undo it (see
+    /// <see cref="MoveMessagesAsync"/>).
     /// </summary>
     Task MoveToInboxMessagesAsync(
-        string folderFullName, IEnumerable<uint> uids, CancellationToken cancellationToken = default);
+        string folderFullName, IEnumerable<uint> uids, bool initiatedByAi = false, CancellationToken cancellationToken = default);
 
     Task SetReadStateAsync(
         string folderFullName, uint uid, bool isRead, CancellationToken cancellationToken = default);

@@ -160,6 +160,18 @@ public interface IMailSyncStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Remembers, per account, that the user moved these messages (by Message-Id) into the Inbox
+    /// themselves, so auto-junk never moves them out again even if the sender is still blocked.
+    /// Message-Ids are used because the move gives the message a new server UID. Blank ids are ignored.
+    /// </summary>
+    Task MarkRescuedAsync(
+        string accountKey, IEnumerable<string> messageIds, CancellationToken cancellationToken = default);
+
+    /// <summary>The subset of <paramref name="messageIds"/> that were marked with <see cref="MarkRescuedAsync"/> for this account.</summary>
+    Task<HashSet<string>> GetRescuedAsync(
+        string accountKey, IEnumerable<string> messageIds, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Stores the full body and attachment metadata for a message, fetched once
     /// during sync so later reads never need the server.
     /// </summary>

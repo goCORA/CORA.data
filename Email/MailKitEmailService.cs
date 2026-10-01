@@ -225,10 +225,137 @@ public class MailKitEmailService : IEmailService
         CancellationToken cancellationToken = default) =>
         GetFoldersAsync(RequireAccount(), cancellationToken);
 
+    /// <summary>
+    /// The server's junk/spam folder from the folders already listed (<paramref name="topLevel"/>
+    /// under the personal namespace, <paramref name="nested"/> inside containers such as
+    /// "[Gmail]") plus the server's special-use Junk folder, if it has one. See
+    /// <see cref="JunkFolderDetection"/> for the rules.
+    /// </summary>
+    private static IMailFolder? PickJunkFolder(
+        IEnumerable<IMailFolder> topLevel, IEnumerable<IMailFolder> nested, IMailFolder? special)
+    {
+        var byName = new Dictionary<string, (IMailFolder Folder, JunkCandidate Candidate)>(StringComparer.OrdinalIgnoreCase);
+
+        void Add(IMailFolder folder, bool isTopLevel, bool flagged)
+        {
+            // The Inbox is never junk, and folders that can't be opened (e.g. "[Gmail]" itself) can't hold mail.
+            if (folder.FullName.Equals("INBOX", StringComparison.OrdinalIgnoreCase)
+                || (folder.Attributes & (FolderAttributes.NoSelect | FolderAttributes.NonExistent)) != 0)
+                return;
+
+            flagged |= (folder.Attributes & FolderAttributes.Junk) != 0;
+            if (byName.TryGetValue(folder.FullName, out var existing))
+            {
+                // Same folder seen twice (e.g. listed, and returned by the special-use lookup): keep the stronger facts.
+                flagged |= existing.Candidate.HasJunkFlag;
+                isTopLevel |= existing.Candidate.IsTopLevel;
+            }
+
+            byName[folder.FullName] = (folder, new JunkCandidate(folder.FullName, folder.Name, flagged, isTopLevel));
+        }
+
+        foreach (var folder in topLevel)
+            Add(folder, isTopLevel: true, flagged: false);
+        foreach (var folder in nested)
+            Add(folder, isTopLevel: false, flagged: false);
+        if (special is not null)
+            Add(special, isTopLevel: false, flagged: true);
+
+        var picked = JunkFolderDetection.Pick(byName.Values.Select(v => v.Candidate));
+        return picked is null ? null : byName[picked.FullName].Folder;
+    }
+
+    private static IMailFolder? TryGetSpecialJunkFolder(ImapClient imap)
+    {
+        try
+        {
+            return imap.GetFolder(SpecialFolder.Junk);
+        }
+        catch (Exception ex)
+        {
+            // Servers without SPECIAL-USE (or XLIST) can't answer; the name list takes over.
+            System.Diagnostics.Debug.WriteLine($"[Folders] no special-use Junk folder: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Finds the account's junk/spam folder on the server with a fresh listing (top level and one
+    /// level inside containers such as "[Gmail]"). Null when the server has none.
+    /// </summary>
+    private static async Task<IMailFolder?> FindJunkFolderAsync(ImapClient imap, CancellationToken cancellationToken)
+    {
+        var personal = imap.GetFolder(imap.PersonalNamespaces[0]);
+        var topLevel = await personal.GetSubfoldersAsync(false, cancellationToken).ConfigureAwait(false);
+
+        var nested = new List<IMailFolder>();
+        foreach (var container in topLevel.Where(f => (f.Attributes & FolderAttributes.HasNoChildren) == 0))
+        {
+            try
+            {
+                nested.AddRange(await container.GetSubfoldersAsync(false, cancellationToken).ConfigureAwait(false));
+            }
+            catch (Exception ex)
+            {
+                // A container we can't enumerate just contributes nothing.
+                System.Diagnostics.Debug.WriteLine($"[Folders] could not list {container.FullName}: {ex.Message}");
+            }
+        }
+
+        return PickJunkFolder(topLevel, nested, TryGetSpecialJunkFolder(imap));
+    }
+
+    // Per-account coalescing of live folder listings; see GetFoldersAsync.
+    private sealed class FolderListState
+    {
+        public readonly SemaphoreSlim Gate = new(1, 1);
+        public long Requested;
+        public long CompletedFor;
+        public IReadOnlyList<MailFolderInfo>? Last;
+    }
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, FolderListState> _folderListStates =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Lists the account's folders live from the server. A listing connects and checks every
+    /// folder, and several parts of the app ask for it at once (the flyout and the mailbox both
+    /// refresh on every FoldersChanged), so concurrent requests are coalesced: one listing runs
+    /// at a time per account, and a request is answered by the first listing that started after
+    /// it was made. Without this, each sync fired several overlapping listings, each on its own
+    /// connection, which made Gmail slow down and then refuse sign-ins.
+    /// </summary>
     public async Task<IReadOnlyList<MailFolderInfo>> GetFoldersAsync(
         MailAccount account, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(account);
+
+        var state = _folderListStates.GetOrAdd(AccountKey(account), _ => new FolderListState());
+        var myRequest = Interlocked.Increment(ref state.Requested);
+        await state.Gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            // A listing that started after this request finished while we waited: it already covers us.
+            if (state.Last is not null && Interlocked.Read(ref state.CompletedFor) >= myRequest)
+                return state.Last;
+
+            var coversUpTo = Interlocked.Read(ref state.Requested);
+            var started = System.Diagnostics.Stopwatch.StartNew();
+            var result = await ListFoldersCoreAsync(account, cancellationToken).ConfigureAwait(false);
+            System.Diagnostics.Debug.WriteLine($"[Folders] live listing for {AccountKey(account)}: {result.Count} folders in {started.ElapsedMilliseconds} ms");
+            state.Last = result;
+            Interlocked.Exchange(ref state.CompletedFor, coversUpTo);
+            return result;
+        }
+        finally
+        {
+            state.Gate.Release();
+        }
+    }
+
+    private async Task<IReadOnlyList<MailFolderInfo>> ListFoldersCoreAsync(
+        MailAccount account, CancellationToken cancellationToken)
+    {
 
         if (account.IsPop3)
         {
@@ -253,17 +380,18 @@ public class MailKitEmailService : IEmailService
                 new() { FullName = "INBOX", Name = "Inbox", Total = count, Unread = cachedInbox.Count(s => !s.IsRead) },
                 new()
                 {
-                    FullName = "Junk",
-                    Name = "Junk",
-                    Total = junkSummaries.Count,
-                    Unread = junkSummaries.Count(s => !s.IsRead),
-                },
-                new()
-                {
                     FullName = SentFolderName,
                     Name = SentFolderName,
                     Total = sentSummaries.Count,
                     Unread = 0,
+                },
+                new()
+                {
+                    FullName = "Junk",
+                    Name = "Junk",
+                    Total = junkSummaries.Count,
+                    Unread = junkSummaries.Count(s => !s.IsRead),
+                    IsJunk = true,
                 },
                 new()
                 {
@@ -312,6 +440,7 @@ public class MailKitEmailService : IEmailService
         // don't send the flag, so a stray "Sent Items" label can't be listed next to the real one.
         var flaggedSent = new List<IMailFolder>();
         var namedSent = new List<IMailFolder>();
+        var containerChildren = new List<IMailFolder>();
         foreach (var container in folders.Where(f => (f.Attributes & FolderAttributes.HasNoChildren) == 0))
         {
             try
@@ -320,6 +449,7 @@ public class MailKitEmailService : IEmailService
                 foreach (var child in children)
                 {
                     System.Diagnostics.Debug.WriteLine($"[Folders] {container.FullName} / {child.FullName} attrs={child.Attributes}");
+                    containerChildren.Add(child);
                     if (ordered.Any(o => o.FullName.Equals(child.FullName, StringComparison.OrdinalIgnoreCase)))
                         continue;
                     if ((child.Attributes & FolderAttributes.Sent) != 0)
@@ -355,6 +485,13 @@ public class MailKitEmailService : IEmailService
             }
         }
 
+        // The server's junk/spam folder, wherever it lives (including inside a container such as
+        // "[Gmail]"), listed so it can be opened and used as the target of "Send to junk".
+        var junkFolder = PickJunkFolder(folders, containerChildren, TryGetSpecialJunkFolder(imap));
+        if (junkFolder is not null
+            && !ordered.Any(o => o.FullName.Equals(junkFolder.FullName, StringComparison.OrdinalIgnoreCase)))
+            ordered.Add(junkFolder);
+
         foreach (var folder in ordered)
         {
             if ((folder.Attributes & FolderAttributes.NonExistent) != 0)
@@ -365,15 +502,18 @@ public class MailKitEmailService : IEmailService
                 continue;
             try
             {
-                await folder.OpenAsync(FolderAccess.ReadOnly, cancellationToken).ConfigureAwait(false);
+                // STATUS gives the counts in one round trip, without selecting the folder
+                // (an open + close costs two, and makes the server prepare the whole folder).
+                await folder.StatusAsync(StatusItems.Count | StatusItems.Unread, cancellationToken).ConfigureAwait(false);
                 result.Add(new MailFolderInfo
                 {
                     FullName = folder.FullName,
                     Name = folder.Name,
                     Total = folder.Count,
                     Unread = folder.Unread,
+                    IsJunk = junkFolder is not null
+                        && folder.FullName.Equals(junkFolder.FullName, StringComparison.OrdinalIgnoreCase),
                 });
-                await folder.CloseAsync(false, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -463,6 +603,7 @@ public class MailKitEmailService : IEmailService
         }
 
         using var imap = await ConnectImapAsync(account, cancellationToken).ConfigureAwait(false);
+        await ThrowIfServerJunkFolderAsync(imap, folderFullName, "deleted", cancellationToken).ConfigureAwait(false);
         var folder = await imap.GetFolderAsync(folderFullName, cancellationToken).ConfigureAwait(false);
         if (folder.IsOpen)
             await folder.CloseAsync(false, cancellationToken).ConfigureAwait(false);
@@ -506,6 +647,7 @@ public class MailKitEmailService : IEmailService
         }
 
         using var imap = await ConnectImapAsync(account, cancellationToken).ConfigureAwait(false);
+        await ThrowIfServerJunkFolderAsync(imap, folderFullName, "renamed", cancellationToken).ConfigureAwait(false);
         var folder = await imap.GetFolderAsync(folderFullName, cancellationToken).ConfigureAwait(false);
         var parent = folder.ParentFolder ?? imap.GetFolder(imap.PersonalNamespaces[0]);
         if (folder.IsOpen)
@@ -514,6 +656,21 @@ public class MailKitEmailService : IEmailService
         await imap.DisconnectAsync(true, cancellationToken).ConfigureAwait(false);
 
         OnFoldersChanged();
+    }
+
+    /// <summary>
+    /// The server's junk folder is as much a folder the app relies on ("Send to junk", auto-junk)
+    /// as Inbox or Trash, whatever it is called, so it may not be renamed or deleted from the app.
+    /// </summary>
+    private static async Task ThrowIfServerJunkFolderAsync(
+        ImapClient imap, string folderFullName, string action, CancellationToken cancellationToken)
+    {
+        var junk = await FindJunkFolderAsync(imap, cancellationToken).ConfigureAwait(false);
+        if (junk is not null && junk.FullName.Equals(folderFullName, StringComparison.OrdinalIgnoreCase))
+        {
+            await imap.DisconnectAsync(true, cancellationToken).ConfigureAwait(false);
+            throw new NotSupportedException($"This folder is required by the app and cannot be {action}.");
+        }
     }
 
     /// <summary>
@@ -872,8 +1029,8 @@ public class MailKitEmailService : IEmailService
             await _syncStore.UpsertAsync(accountKey, imapFolderName, newSummaries, cancellationToken)
                 .ConfigureAwait(false);
 
-        // Auto-route newly-synced mail from blacklisted senders/domains straight to Junk.
-        await AutoJunkBlacklistedAsync(accountKey, imapFolderName, newSummaries, cancellationToken)
+        // Auto-route newly-synced mail from blacklisted senders/domains to the server's junk folder.
+        await AutoJunkBlacklistedImapAsync(imap, folder, accountKey, imapFolderName, newSummaries, cancellationToken)
             .ConfigureAwait(false);
 
         // Refresh the local read state of every already-cached message from the server's
@@ -902,9 +1059,20 @@ public class MailKitEmailService : IEmailService
         }
 
         // Prune local rows for messages that are no longer on the server (e.g. deleted from
-        // another client), same reasoning as the POP3 orphan-pruning above.
+        // another client), same reasoning as the POP3 orphan-pruning above. Locally-moved rows
+        // (e.g. blacklisted mail filed under "Junk") carry a uidl from another folder that this
+        // folder's server list will never contain, so they are excluded, as on POP3; the cached
+        // rows are only read when there is something to prune.
         var serverUidlSet = serverUidls.ToHashSet();
-        var staleUidls = knownUidls.Where(uidl => !serverUidlSet.Contains(uidl)).ToList();
+        HashSet<string> localOnlyUidls = [];
+        if (knownUidls.Any(uidl => !serverUidlSet.Contains(uidl)))
+        {
+            var cachedForPrune = await _syncStore.GetCachedSummariesAsync(accountKey, imapFolderName, cancellationToken)
+                .ConfigureAwait(false);
+            localOnlyUidls = cachedForPrune.Where(s => s.IsLocalOnly).Select(s => s.Uidl).ToHashSet();
+        }
+
+        var staleUidls = FindStaleUidls(knownUidls, serverUidlSet, localOnlyUidls);
         foreach (var uidl in staleUidls)
             await _syncStore.DeleteAsync(accountKey, imapFolderName, uidl, cancellationToken).ConfigureAwait(false);
 
@@ -918,6 +1086,14 @@ public class MailKitEmailService : IEmailService
         return imapChanged;
     }
 
+
+    /// <summary>
+    /// The cached uidls an IMAP folder sync should prune: known locally, absent from the server,
+    /// and not a locally-moved row (those never appear in the server's list).
+    /// </summary>
+    internal static List<string> FindStaleUidls(
+        IEnumerable<string> knownUidls, ISet<string> serverUidls, ISet<string> localOnlyUidls) =>
+        knownUidls.Where(uidl => !serverUidls.Contains(uidl) && !localOnlyUidls.Contains(uidl)).ToList();
 
     public async Task<EmailMessage> GetMessageAsync(
         string folderFullName, uint uid, CancellationToken cancellationToken = default)
@@ -1420,8 +1596,6 @@ public class MailKitEmailService : IEmailService
         OnFoldersChanged();
     }
 
-    private static readonly string[] JunkFolderNames = ["Junk", "Junk E-Mail", "Spam", "Bulk Mail"];
-
     /// <summary>
     /// Flattens a message's RFC 5322 <c>References</c> chain into a single space-separated
     /// string for storage, preserving the sender's original ordering (oldest ancestor first).
@@ -1468,17 +1642,7 @@ public class MailKitEmailService : IEmailService
         var sourceFolder = await OpenFolderAsync(imap, folderFullName, FolderAccess.ReadWrite, cancellationToken)
             .ConfigureAwait(false);
 
-        var personal = imap.GetFolder(imap.PersonalNamespaces[0]);
-        var subfolders = await personal.GetSubfoldersAsync(false, cancellationToken).ConfigureAwait(false);
-
-        IMailFolder? destinationFolder = null;
-        foreach (var candidateName in JunkFolderNames)
-        {
-            destinationFolder = subfolders.FirstOrDefault(
-                f => f.Name.Equals(candidateName, StringComparison.OrdinalIgnoreCase));
-            if (destinationFolder is not null)
-                break;
-        }
+        var destinationFolder = await FindJunkFolderAsync(imap, cancellationToken).ConfigureAwait(false);
 
         if (destinationFolder is null)
         {
@@ -1532,17 +1696,7 @@ public class MailKitEmailService : IEmailService
         var sourceFolder = await OpenFolderAsync(imap, folderFullName, FolderAccess.ReadWrite, cancellationToken)
             .ConfigureAwait(false);
 
-        var personal = imap.GetFolder(imap.PersonalNamespaces[0]);
-        var subfolders = await personal.GetSubfoldersAsync(false, cancellationToken).ConfigureAwait(false);
-
-        IMailFolder? destinationFolder = null;
-        foreach (var candidateName in JunkFolderNames)
-        {
-            destinationFolder = subfolders.FirstOrDefault(
-                f => f.Name.Equals(candidateName, StringComparison.OrdinalIgnoreCase));
-            if (destinationFolder is not null)
-                break;
-        }
+        var destinationFolder = await FindJunkFolderAsync(imap, cancellationToken).ConfigureAwait(false);
 
         if (destinationFolder is null)
         {
@@ -1599,9 +1753,27 @@ public class MailKitEmailService : IEmailService
     }
 
     /// <summary>
-    /// After a sync caches a batch of newly-seen messages, moves any of them that are from a
-    /// blacklisted sender/domain into the local "Junk" folder. Skipped for folders that are
-    /// already Junk, Trash, or Sent, to avoid pointless moves/loops.
+    /// Whether auto-junk looks at newly-synced mail in this folder. Only the Inbox: mail in any
+    /// other folder (custom folders, Junk, Trash, Sent, ...) is there on purpose or already
+    /// handled, so it is never moved.
+    /// </summary>
+    internal static bool IsAutoJunkFolder(string folderFullName) =>
+        string.Equals(folderFullName, "INBOX", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The blacklisted messages auto-junk may actually move: not the ones the user moved into the
+    /// Inbox themselves (<paramref name="rescuedMessageIds"/>, normalized Message-Ids).
+    /// </summary>
+    internal static List<StoredMailSummary> ExcludeRescued(
+        IEnumerable<StoredMailSummary> blacklisted, ISet<string> rescuedMessageIds) =>
+        blacklisted
+            .Where(s => !rescuedMessageIds.Contains(MailSyncDatabase.NormalizeMessageId(s.MessageId)))
+            .ToList();
+
+    /// <summary>
+    /// POP3 only: after a sync caches a batch of newly-seen messages, moves any of them that are
+    /// from a blacklisted sender/domain into the local virtual "Junk" folder. IMAP accounts use
+    /// <see cref="AutoJunkBlacklistedImapAsync"/>, which moves the mail on the server instead.
     /// </summary>
     private async Task AutoJunkBlacklistedAsync(
         string accountKey, string folderFullName, IReadOnlyList<StoredMailSummary> newSummaries,
@@ -1610,9 +1782,7 @@ public class MailKitEmailService : IEmailService
         if (newSummaries.Count == 0)
             return;
 
-        if (string.Equals(folderFullName, "Junk", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(folderFullName, TrashFolderName, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(folderFullName, SentFolderName, StringComparison.OrdinalIgnoreCase))
+        if (!IsAutoJunkFolder(folderFullName))
             return;
 
         const string junkFolder = "Junk";
@@ -1627,11 +1797,66 @@ public class MailKitEmailService : IEmailService
     }
 
     /// <summary>
+    /// IMAP only: after a sync caches a batch of newly-seen messages, moves any of them that are
+    /// from a blacklisted sender/domain into the server's junk folder (see
+    /// <see cref="JunkFolderDetection"/>) and drops their cached rows here; the junk folder's own
+    /// sync picks them up. If the server has no junk folder, or the move fails, the mail simply
+    /// stays where it is. Nothing is ever filed in a local-only folder on IMAP.
+    /// </summary>
+    private async Task AutoJunkBlacklistedImapAsync(
+        ImapClient imap, IMailFolder folder, string accountKey, string folderFullName,
+        IReadOnlyList<StoredMailSummary> newSummaries, CancellationToken cancellationToken)
+    {
+        if (newSummaries.Count == 0 || !IsAutoJunkFolder(folderFullName))
+            return;
+
+        var blacklisted = new List<StoredMailSummary>();
+        foreach (var summary in newSummaries)
+        {
+            if (await IsBlacklistedAsync(summary.From, cancellationToken).ConfigureAwait(false))
+                blacklisted.Add(summary);
+        }
+
+        if (blacklisted.Count == 0)
+            return;
+
+        try
+        {
+            // Mail the user moved into the Inbox themselves stays, even if the sender is still blocked.
+            var rescued = await _syncStore.GetRescuedAsync(accountKey, blacklisted.Select(s => s.MessageId), cancellationToken)
+                .ConfigureAwait(false);
+            blacklisted = ExcludeRescued(blacklisted, rescued);
+            if (blacklisted.Count == 0)
+                return;
+
+            var junk = await FindJunkFolderAsync(imap, cancellationToken).ConfigureAwait(false);
+            if (junk is null)
+                return;
+
+            // The sync opened the folder read-only; moving needs write access.
+            await folder.OpenAsync(FolderAccess.ReadWrite, cancellationToken).ConfigureAwait(false);
+            var uniqueIds = new UniqueIdSet(blacklisted.Select(s => new UniqueId(s.Uid)));
+            await folder.MoveToAsync(uniqueIds, junk, cancellationToken).ConfigureAwait(false);
+
+            foreach (var summary in blacklisted)
+                await _syncStore.DeleteAsync(accountKey, folderFullName, summary.Uidl, cancellationToken)
+                    .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Best-effort: the mail stays in this folder and is tried again only if it is seen as
+            // new again; a failed junk move must never fail the sync itself.
+            System.Diagnostics.Debug.WriteLine($"[AutoJunk] could not move blacklisted mail out of {folderFullName}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
     /// Move messages from one folder to another. This is a generic implementation used by the UI
     /// when the user selects an arbitrary destination folder.
     /// </summary>
     public async Task MoveMessagesAsync(
-        string sourceFolderFullName, IEnumerable<uint> uids, string destinationFolderFullName, CancellationToken cancellationToken = default)
+        string sourceFolderFullName, IEnumerable<uint> uids, string destinationFolderFullName,
+        bool initiatedByAi = false, CancellationToken cancellationToken = default)
     {
         var uidList = uids as IReadOnlyCollection<uint> ?? uids.ToList();
         if (uidList.Count == 0)
@@ -1654,6 +1879,12 @@ public class MailKitEmailService : IEmailService
             OnFoldersChanged();
             return;
         }
+
+        // The user's own move into the Inbox must stick: read the Message-Ids from the cache
+        // before the rows are removed below, and remember them once the server move succeeded.
+        var rescueMessageIds = ShouldRecordRescue(destinationFolderFullName, initiatedByAi)
+            ? await GetCachedMessageIdsAsync(AccountKey(account), sourceFolderFullName, uidList, cancellationToken).ConfigureAwait(false)
+            : [];
 
         using var imap = await ConnectImapAsync(account, cancellationToken).ConfigureAwait(false);
         var sourceFolder = await OpenFolderAsync(imap, sourceFolderFullName, FolderAccess.ReadWrite, cancellationToken).ConfigureAwait(false);
@@ -1679,13 +1910,35 @@ public class MailKitEmailService : IEmailService
         await imap.DisconnectAsync(true, cancellationToken).ConfigureAwait(false);
 
         var syncAccountKey = AccountKey(account);
+        if (rescueMessageIds.Count > 0)
+            await _syncStore.MarkRescuedAsync(syncAccountKey, rescueMessageIds, cancellationToken).ConfigureAwait(false);
         foreach (var uid in uidList)
             await _syncStore.DeleteAsync(syncAccountKey, sourceFolderFullName, uid.ToString(), cancellationToken).ConfigureAwait(false);
         OnFoldersChanged();
     }
 
+    /// <summary>
+    /// Whether a move should be remembered as the user rescuing mail. Auto-junk only ever looks
+    /// at the Inbox, so only a user-made move into the Inbox can be undone by it; anything the
+    /// AI assistant moves must never count as the user's decision.
+    /// </summary>
+    internal static bool ShouldRecordRescue(string destinationFolderFullName, bool initiatedByAi) =>
+        !initiatedByAi && string.Equals(destinationFolderFullName, "INBOX", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The Message-Ids of the cached messages with these UIDs in a folder (blank ones left out).</summary>
+    private async Task<List<string>> GetCachedMessageIdsAsync(
+        string accountKey, string folderFullName, IReadOnlyCollection<uint> uids, CancellationToken cancellationToken)
+    {
+        var wanted = uids.ToHashSet();
+        var cached = await _syncStore.GetCachedSummariesAsync(accountKey, folderFullName, cancellationToken).ConfigureAwait(false);
+        return cached
+            .Where(s => wanted.Contains(s.Uid) && !string.IsNullOrWhiteSpace(s.MessageId))
+            .Select(s => s.MessageId)
+            .ToList();
+    }
+
     public async Task MoveToInboxMessagesAsync(
-        string folderFullName, IEnumerable<uint> uids, CancellationToken cancellationToken = default)
+        string folderFullName, IEnumerable<uint> uids, bool initiatedByAi = false, CancellationToken cancellationToken = default)
     {
         var uidList = uids as IReadOnlyCollection<uint> ?? uids.ToList();
         if (uidList.Count == 0)
@@ -1711,6 +1964,11 @@ public class MailKitEmailService : IEmailService
             return;
         }
 
+        // Read before the rows are removed below; see MoveMessagesAsync.
+        var rescueMessageIds = ShouldRecordRescue("INBOX", initiatedByAi)
+            ? await GetCachedMessageIdsAsync(AccountKey(account), folderFullName, uidList, cancellationToken).ConfigureAwait(false)
+            : [];
+
         using var imap = await ConnectImapAsync(account, cancellationToken).ConfigureAwait(false);
 
         var sourceFolder = await OpenFolderAsync(imap, folderFullName, FolderAccess.ReadWrite, cancellationToken)
@@ -1724,6 +1982,8 @@ public class MailKitEmailService : IEmailService
         await imap.DisconnectAsync(true, cancellationToken).ConfigureAwait(false);
 
         var inboxAccountKey = AccountKey(account);
+        if (rescueMessageIds.Count > 0)
+            await _syncStore.MarkRescuedAsync(inboxAccountKey, rescueMessageIds, cancellationToken).ConfigureAwait(false);
         foreach (var uid in uidList)
             await _syncStore.DeleteAsync(inboxAccountKey, folderFullName, uid.ToString(), cancellationToken)
                 .ConfigureAwait(false);

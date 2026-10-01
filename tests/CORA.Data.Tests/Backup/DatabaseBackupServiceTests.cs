@@ -11,7 +11,7 @@ public class DatabaseBackupServiceTests : IDisposable
    [
       "tags.litedb", "mailsync.litedb", "accounts.litedb", "contacts.litedb",
       "trustedImageSenders.litedb", "blacklist.litedb", "ai_autonomy.litedb", "hidden_folders.litedb",
-      "ai_result_cache.litedb",
+      "ai_result_cache.litedb", "folder_order.litedb",
    ];
 
    private readonly string _dir = Path.Combine(Path.GetTempPath(), "cora-tests-" + Guid.NewGuid().ToString("N"));
@@ -66,7 +66,7 @@ public class DatabaseBackupServiceTests : IDisposable
    }
 
    [Fact]
-   public void RestoreBackupArchive_RestoresHiddenFolders_WithTheAccountsToggle_AndNotWithout()
+   public void RestoreBackupArchive_RestoresHiddenFoldersAndFolderOrder_WithTheAccountsToggle_AndNotWithout()
    {
       WriteAllStoreFiles("original");
       using var backup = BackupOfCurrentFiles();
@@ -79,7 +79,7 @@ public class DatabaseBackupServiceTests : IDisposable
 
       foreach (var name in AllStoreFiles)
       {
-         var expected = name is "accounts.litedb" or "hidden_folders.litedb" ? "original" : "changed-since-backup";
+         var expected = name is "accounts.litedb" or "hidden_folders.litedb" or "folder_order.litedb" ? "original" : "changed-since-backup";
          Assert.Equal($"{expected}:{name}", File.ReadAllText(Path.Combine(_dir, name)));
       }
    }

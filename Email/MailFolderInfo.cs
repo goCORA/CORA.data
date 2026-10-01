@@ -10,5 +10,8 @@ public class MailFolderInfo
     public int Unread { get; set; }
     public int Total { get; set; }
 
+    /// <summary>True for the account's junk/spam folder: the local virtual one (POP3) or the one detected on the IMAP server.</summary>
+    public bool IsJunk { get; set; }
+
     public string Display => Unread > 0 ? $"{Name} ({Unread})" : Name;
 }
