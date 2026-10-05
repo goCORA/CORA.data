@@ -19,6 +19,13 @@ public class EmailSummary : INotifyPropertyChanged
     public string Subject { get; set; } = string.Empty;
     public DateTimeOffset Date { get; set; }
 
+    /// <summary>
+    /// <see cref="Date"/> in the device's time zone, for display. <see cref="Date"/> keeps the
+    /// sender's offset, so formatting it directly showed the sender's clock time (e.g. 6:14 PM
+    /// for mail sent at 2:14 PM Eastern with a UTC Date header).
+    /// </summary>
+    public DateTime LocalDate => Date.LocalDateTime;
+
     public bool IsRead
     {
         get => _isRead;
