@@ -106,19 +106,91 @@ internal sealed class MailCertificateCheck
         Errors = errors;
         try
         {
-            Certificate = certificate switch
-            {
-                null => null,
-                X509Certificate2 c2 => c2,
-                _ => X509CertificateLoader.LoadCertificate(certificate.GetRawCertData()),
-            };
+            // Always keep our own copy: when this check refuses the certificate, the TLS stream
+            // disposes the object it passed in, and reading it later (in ToException) then fails
+            // inside the crypto library (seen on Android as a NullReferenceException).
+            Certificate = certificate is null
+                ? null
+                : X509CertificateLoader.LoadCertificate(certificate.GetRawCertData());
         }
         catch
         {
             Certificate = null;
         }
 
+        if (errors == SslPolicyErrors.RemoteCertificateChainErrors && OnlyRevocationUnknown(chain))
+        {
+            // goCORA does not check revocation (CheckCertificateRevocation = false on every
+            // client). Windows honours that; Android's chain check still tries an online
+            // revocation lookup and reports a complete, trusted chain as an error when the lookup
+            // can't complete. Only that one verdict is set aside: any other chain problem (broken
+            // chain, untrusted root, expired) or a name mismatch is still refused.
+            errors = SslPolicyErrors.None;
+            Errors = errors;
+        }
+
+        if (errors != SslPolicyErrors.None)
+            TraceRefusal(certificate, chain, errors);
+
         return errors == SslPolicyErrors.None;
+    }
+
+    private static bool OnlyRevocationUnknown(X509Chain? chain)
+    {
+        if (chain is null || chain.ChainStatus.Length == 0)
+            return false;
+
+        foreach (var status in chain.ChainStatus)
+        {
+            if (status.Status is not (X509ChainStatusFlags.NoError
+                or X509ChainStatusFlags.RevocationStatusUnknown
+                or X509ChainStatusFlags.OfflineRevocation))
+                return false;
+        }
+
+        // Also per certificate, so a problem reported only on one element is not missed.
+        foreach (var element in chain.ChainElements)
+        {
+            foreach (var status in element.ChainElementStatus)
+            {
+                if (status.Status is not (X509ChainStatusFlags.NoError
+                    or X509ChainStatusFlags.RevocationStatusUnknown
+                    or X509ChainStatusFlags.OfflineRevocation))
+                    return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Writes what the server sent and why it was refused to the debug output (no secrets: only
+    /// public certificate names, dates and the platform's chain verdict).
+    /// </summary>
+    private static void TraceRefusal(X509Certificate? certificate, X509Chain? chain, SslPolicyErrors errors)
+    {
+        try
+        {
+            var lines = new List<string> { $"MailCertificateCheck: refused ({errors})" };
+            if (certificate is not null)
+                lines.Add($"  server certificate: subject={certificate.Subject}; issuer={certificate.Issuer}");
+            if (chain is not null)
+            {
+                lines.Add($"  chain built by the platform: {chain.ChainElements.Count} certificate(s)");
+                foreach (var element in chain.ChainElements)
+                {
+                    var c = element.Certificate;
+                    lines.Add($"    - {c.Subject} (issuer {c.Issuer}; valid {c.NotBefore:yyyy-MM-dd} to {c.NotAfter:yyyy-MM-dd})");
+                }
+                foreach (var status in chain.ChainStatus)
+                    lines.Add($"  chain status: {status.Status}: {status.StatusInformation.Trim()}");
+            }
+            System.Diagnostics.Trace.WriteLine(string.Join(Environment.NewLine, lines));
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Trace.WriteLine($"MailCertificateCheck: refused ({errors}); details unavailable: {ex.Message}");
+        }
     }
 
     /// <summary>
