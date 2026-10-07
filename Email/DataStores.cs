@@ -345,9 +345,10 @@ public sealed class SecureDataStores : IDataStores, IDisposable
     }
 
     /// <summary>
-    /// Loads the single master encryption key (creating it on first run), opens every
-    /// encrypted LiteDB-backed store with it, and returns the fully constructed facade.
-    /// Must be called once, during app startup, before any store is used.
+    /// Starts CORA (the Rust core loads the master encryption key, creating it on first run, and
+    /// holds it), opens every encrypted LiteDB-backed store, and returns the fully constructed
+    /// facade. Must be called once, during app startup, before any store is used. Throws
+    /// <see cref="CoraCoreUnavailableException"/> if the Rust core cannot be used on this device.
     /// </summary>
     public static async Task<IDataStores> CreateAsync(
         IAppDataLocation dataLocation, ISecureKeyStorage secureKeyStorage, IPreferenceStore preferences)
@@ -356,8 +357,8 @@ public sealed class SecureDataStores : IDataStores, IDisposable
         ArgumentNullException.ThrowIfNull(secureKeyStorage);
         ArgumentNullException.ThrowIfNull(preferences);
 
-        // Loads (or creates) the single master key into memory once. Every encrypted
-        // LiteDB file below is opened using this in-memory key — CORA.App never sees it.
+        // The Rust core loads (or creates) the master key and keeps it. Every encrypted LiteDB
+        // file below is decrypted and saved by the Rust core - neither C# nor CORA.App sees the key.
         await Cora.InitializeAsync(secureKeyStorage).ConfigureAwait(false);
 
         var baseDir = dataLocation.AppDataDirectory;

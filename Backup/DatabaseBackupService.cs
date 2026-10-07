@@ -173,9 +173,18 @@ public sealed class DatabaseBackupService
         }
     }
 
-    /// <summary>Returns the current master encryption key (base64), or null if none is set.</summary>
-    public Task<string?> ExportEncryptionKeyAsync() => Cora.ExportMasterKeyAsync(_secureKeyStorage);
+    /// <summary>
+    /// Creates the encryption-key backup for the signed-in account: the contents of a
+    /// <c>.txt.enc</c> file (the master key, encrypted for the account). No key is returned.
+    /// </summary>
+    public Task<byte[]> CreateEncryptionKeyBackupAsync(AccountBackupKey accountKey) =>
+        AccountBackup.ExportMasterKeyAsync(_secureKeyStorage, accountKey);
 
-    /// <summary>Replaces the current master encryption key (base64) with <paramref name="key"/>.</summary>
-    public Task ImportEncryptionKeyAsync(string key) => Cora.ImportMasterKeyAsync(_secureKeyStorage, key);
+    /// <summary>
+    /// Restores an encryption-key backup made for this account (email address + the PIN/password
+    /// it was made with). Takes effect at the next app start. A wrong email or PIN/password throws
+    /// <see cref="System.Security.Cryptography.CryptographicException"/>.
+    /// </summary>
+    public Task RestoreEncryptionKeyBackupAsync(string accountEmail, string? passphrase, byte[] backup) =>
+        AccountBackup.ImportMasterKeyAsync(_secureKeyStorage, accountEmail, passphrase, backup);
 }

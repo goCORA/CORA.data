@@ -43,4 +43,14 @@
     <Compile Include="..\..\..\CORA.App\Services\AI\AiErrorMessages.cs" Link="App\Linked\AiErrorMessages.cs" />
   </ItemGroup>
 
+  <!-- Rust core: copy the Windows library next to the tests (debug build first, else the release build in dist). -->
+  <PropertyGroup>
+    <CoraRustDll Condition="Exists('..\..\..\CORA.Core_rust\target\debug\cora_core.dll')">..\..\..\CORA.Core_rust\target\debug\cora_core.dll</CoraRustDll>
+    <CoraRustDll Condition="'$(CoraRustDll)' == '' And Exists('..\..\..\CORA.Core_rust\dist\windows\win-x64\cora_core.dll')">..\..\..\CORA.Core_rust\dist\windows\win-x64\cora_core.dll</CoraRustDll>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(CoraRustDll)' != ''">
+    <None Include="$(CoraRustDll)" Link="cora_core.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

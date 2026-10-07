@@ -90,31 +90,14 @@ internal static class LegacyContactMigration
         }
     }
 
+    // The current master key or a retired one (the key itself never leaves CORA.Core).
     private static bool CanDecrypt(byte[] payload)
     {
-        if (TryDecrypt(payload, Cora.GetMasterKey()))
-            return true;
-
-        foreach (var oldKey in Cora.GetPreviousMasterKeys())
-        {
-            if (TryDecrypt(payload, oldKey))
-                return true;
-        }
-
-        return false;
-    }
-
-    private static bool TryDecrypt(byte[] payload, byte[] key)
-    {
-        try
-        {
-            Cora.Decrypt(payload, key);
-            return true;
-        }
-        catch (Exception)
-        {
+        if (!MasterKeyData.TryDecrypt(payload, out var plaintext))
             return false;
-        }
+
+        Cora.Wipe(plaintext);
+        return true;
     }
 
     private static List<BsonDocument> ReadContacts(string legacyPath)
@@ -126,9 +109,18 @@ internal static class LegacyContactMigration
 
     private static int CountContactsOnDisk(string path)
     {
-        var plaintext = Cora.Decrypt(File.ReadAllBytes(path), Cora.GetMasterKey());
-        using var db = new LiteDatabase(new MemoryStream(plaintext));
-        return db.GetCollection(CollectionName).Count();
+        if (!MasterKeyData.TryDecrypt(File.ReadAllBytes(path), out var plaintext) || plaintext is null)
+            throw new InvalidOperationException("Contact migration verification failed: the encrypted contacts file could not be read back.");
+
+        try
+        {
+            using var db = new LiteDatabase(new MemoryStream(plaintext));
+            return db.GetCollection(CollectionName).Count();
+        }
+        finally
+        {
+            Cora.Wipe(plaintext);
+        }
     }
 
     private static void WipeAndDelete(string path)
