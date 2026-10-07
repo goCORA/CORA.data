@@ -220,4 +220,39 @@ public class MailBodyTextTests
     {
         Assert.Equal(string.Empty, MailBodyText.Normalize(text));
     }
+
+    // ── Camouflaged text: tiny fonts and same-colour text ──────────────────
+
+    [Theory]
+    [InlineData("<span style=\"color:#fff\">SECRET</span><p>Body</p>")]
+    [InlineData("<span style=\"color:#FFFFFF\">SECRET</span><p>Body</p>")]
+    [InlineData("<span style=\"color: white\">SECRET</span><p>Body</p>")]
+    [InlineData("<span style=\"color:rgb(255, 255, 255)\">SECRET</span><p>Body</p>")]
+    [InlineData("<span style=\"color:#fefefe\">SECRET</span><p>Body</p>")]
+    [InlineData("<font color=\"white\">SECRET</font><p>Body</p>")]
+    [InlineData("<div style=\"background-color:#000\"><span style=\"color:#010101\">SECRET</span></div><p>Body</p>")]
+    [InlineData("<table bgcolor=\"#336699\"><tr><td><font color=\"#336699\">SECRET</font></td></tr></table><p>Body</p>")]
+    [InlineData("<div style=\"font-size:1px\">SECRET</div><p>Body</p>")]
+    [InlineData("<div style=\"font-size:2pt\">SECRET</div><p>Body</p>")]
+    [InlineData("<div style=\"font-size:0.1em\">SECRET</div><p>Body</p>")]
+    public void Camouflaged_text_is_dropped(string html)
+    {
+        Assert.Equal("Body", MailBodyText.FromHtml(html));
+    }
+
+    [Theory]
+    [InlineData("<div style=\"background:#000\"><span style=\"color:#fff\">Visible</span></div>")]
+    [InlineData("<td style=\"background-color:#222;color:#fff\">Visible</td>")]
+    [InlineData("<table bgcolor=\"black\"><tr><td><font color=\"white\">Visible</font></td></tr></table>")]
+    [InlineData("<span style=\"color:#333\">Visible</span>")]
+    [InlineData("<span style=\"background-color:#fff\">Visible</span>")]
+    [InlineData("<span style=\"color:transparent-ish\">Visible</span>")]
+    [InlineData("<span style=\"color:rgba(255,255,255,0.5)\">Visible</span>")]
+    [InlineData("<div style=\"font-size:9px\">Visible</div>")]
+    [InlineData("<div style=\"font-size:0.75em\">Visible</div>")]
+    [InlineData("<div style=\"line-height:1px;font-size:12px\">Visible</div>")]
+    public void Ordinary_coloured_or_small_text_is_kept(string html)
+    {
+        Assert.Equal("Visible", MailBodyText.FromHtml(html));
+    }
 }
