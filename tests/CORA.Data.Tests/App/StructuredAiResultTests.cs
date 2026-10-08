@@ -173,4 +173,39 @@ public class StructuredAiResultTests
     {
         Assert.Null(StructuredAiResult.TryParseExtractedFields("[]"));
     }
+
+    // ── TryParseSuggestedReply ──────────────────────────────────────────────
+
+    [Fact]
+    public void TryParseSuggestedReply_splits_reply_and_cautions()
+    {
+        var raw = """{"reply": "Hello,\n\nThanks.\n\n[Your Name]", "cautions": ["Verify the invoice before paying", " "]}""";
+
+        var parsed = StructuredAiResult.TryParseSuggestedReply(raw);
+
+        Assert.NotNull(parsed);
+        Assert.Equal("Hello,\n\nThanks.\n\n[Your Name]", parsed!.Reply);
+        Assert.Equal("Verify the invoice before paying", Assert.Single(parsed.Cautions));
+    }
+
+    [Fact]
+    public void TryParseSuggestedReply_accepts_a_code_fence_and_missing_cautions()
+    {
+        var parsed = StructuredAiResult.TryParseSuggestedReply("```json\n{\"reply\": \"Sure, see you then.\"}\n```");
+
+        Assert.NotNull(parsed);
+        Assert.Equal("Sure, see you then.", parsed!.Reply);
+        Assert.Empty(parsed.Cautions);
+    }
+
+    [Theory]
+    [InlineData("Here's a draft reply: Hello, thanks!")]
+    [InlineData("{\"cautions\": [\"x\"]}")]
+    [InlineData("{\"reply\": \"  \"}")]
+    [InlineData("{not json")]
+    [InlineData(null)]
+    public void TryParseSuggestedReply_returns_null_when_there_is_no_usable_reply(string? raw)
+    {
+        Assert.Null(StructuredAiResult.TryParseSuggestedReply(raw));
+    }
 }
