@@ -21,6 +21,7 @@ public interface IDataStores : IDisposable
     IHiddenFolderStore HiddenFolders { get; }
     IFolderOrderStore FolderOrder { get; }
     IAiResultCacheStore AiResultCache { get; }
+    ISecureMessageKeyStore SecureMessageKeys { get; }
 
     /// <summary>
     /// Immediately flushes every store to disk without closing anything. Safe to call
@@ -116,6 +117,7 @@ public sealed class SecureDataStores : IDataStores, IDisposable
     private readonly HiddenFolderDatabase _hiddenFolders;
     private readonly FolderOrderDatabase _folderOrder;
     private readonly AiResultCacheDatabase _aiResultCache;
+    private readonly SecureMessageKeyDatabase _secureMessageKeys;
     private readonly IFlushableStore[] _flushableStores;
     private readonly string _baseDir;
     private readonly CancellationTokenSource _autoFlushCts = new();
@@ -136,13 +138,14 @@ public sealed class SecureDataStores : IDataStores, IDisposable
     public IHiddenFolderStore HiddenFolders => _hiddenFolders;
     public IFolderOrderStore FolderOrder => _folderOrder;
     public IAiResultCacheStore AiResultCache => _aiResultCache;
+    public ISecureMessageKeyStore SecureMessageKeys => _secureMessageKeys;
 
     private SecureDataStores(
         string baseDir,
         TagDatabase tags, MailSyncDatabase mailSync, AccountCredentialDatabase accounts,
         TrustedImageSenderDatabase trustedImageSenders, BlacklistDatabase blacklist,
         AiAutonomyDatabase aiAutonomy, ContactDatabase contacts, HiddenFolderDatabase hiddenFolders,
-        FolderOrderDatabase folderOrder, AiResultCacheDatabase aiResultCache)
+        FolderOrderDatabase folderOrder, AiResultCacheDatabase aiResultCache, SecureMessageKeyDatabase secureMessageKeys)
     {
         _baseDir = baseDir;
         _tags = tags;
@@ -155,7 +158,8 @@ public sealed class SecureDataStores : IDataStores, IDisposable
         _hiddenFolders = hiddenFolders;
         _folderOrder = folderOrder;
         _aiResultCache = aiResultCache;
-        _flushableStores = [_tags, _mailSync, _accounts, _trustedImageSenders, _blacklist, _aiAutonomy, _contacts, _hiddenFolders, _folderOrder, _aiResultCache];
+        _secureMessageKeys = secureMessageKeys;
+        _flushableStores = [_tags, _mailSync, _accounts, _trustedImageSenders, _blacklist, _aiAutonomy, _contacts, _hiddenFolders, _folderOrder, _aiResultCache, _secureMessageKeys];
 
         // Option B: background safety-net flush, so a mid-session OS kill (which never
         // gives Dispose() a chance to run) loses at most a few seconds of writes instead
@@ -407,8 +411,9 @@ public sealed class SecureDataStores : IDataStores, IDisposable
         }
 
         var folderOrder = new FolderOrderDatabase(Path.Combine(baseDir, StoreFiles.FolderOrder));
+        var secureMessageKeys = new SecureMessageKeyDatabase(Path.Combine(baseDir, StoreFiles.SecureMessageKeys));
 
-        return new SecureDataStores(baseDir, tags, mailSync, accounts, trustedImageSenders, blacklist, aiAutonomy, contacts, hiddenFolders, folderOrder, aiResultCache);
+        return new SecureDataStores(baseDir, tags, mailSync, accounts, trustedImageSenders, blacklist, aiAutonomy, contacts, hiddenFolders, folderOrder, aiResultCache, secureMessageKeys);
     }
 
     public void Dispose()

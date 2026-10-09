@@ -136,7 +136,12 @@ public sealed class DatabaseBackupService
             allowFiles.Add(StoreFiles.FolderOrder);
         }
         if (restoreContacts) allowFiles.Add(StoreFiles.Contacts);
-        if (restoreMailboxes) allowFiles.Add(StoreFiles.MailSync);
+        // The keys of secure emails sent from this device belong with the mail itself.
+        if (restoreMailboxes)
+        {
+            allowFiles.Add(StoreFiles.MailSync);
+            allowFiles.Add(StoreFiles.SecureMessageKeys);
+        }
         if (restoreTrustedImageSenders) allowFiles.Add(StoreFiles.TrustedImageSenders);
         if (restoreBlacklist) allowFiles.Add(StoreFiles.Blacklist);
         if (restoreAiAutonomy) allowFiles.Add(StoreFiles.AiAutonomy);

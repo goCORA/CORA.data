@@ -68,4 +68,10 @@ public class OutgoingMessage
     /// conversation on their side.
     /// </summary>
     public string References { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Send only a plain-text body (no HTML alternative). Used for secure (CORA-encrypted) emails,
+    /// whose Base64 lines must arrive exactly as written.
+    /// </summary>
+    public bool PlainTextOnly { get; set; }
 }

@@ -11,7 +11,7 @@ public class DatabaseBackupServiceTests : IDisposable
    [
       "tags.litedb", "mailsync.litedb", "accounts.litedb", "contacts.litedb",
       "trustedImageSenders.litedb", "blacklist.litedb", "ai_autonomy.litedb", "hidden_folders.litedb",
-      "ai_result_cache.litedb", "folder_order.litedb",
+      "ai_result_cache.litedb", "folder_order.litedb", "secure_message_keys.litedb",
    ];
 
    private readonly string _dir = Path.Combine(Path.GetTempPath(), "cora-tests-" + Guid.NewGuid().ToString("N"));

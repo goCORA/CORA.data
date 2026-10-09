@@ -17,6 +17,7 @@ internal static class StoreFiles
     public const string HiddenFolders = "hidden_folders.litedb";
     public const string AiResultCache = "ai_result_cache.litedb";
     public const string FolderOrder = "folder_order.litedb";
+    public const string SecureMessageKeys = "secure_message_keys.litedb";
 
     /// <summary>Subdirectory of the app data directory holding synced (POP3) attachments.</summary>
     public const string AttachmentsDirectory = "mail_attachments";
@@ -34,5 +35,6 @@ internal static class StoreFiles
         HiddenFolders,
         AiResultCache,
         FolderOrder,
+        SecureMessageKeys,
     ];
 }

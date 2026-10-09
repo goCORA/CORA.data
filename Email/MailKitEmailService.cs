@@ -2230,7 +2230,7 @@ public class MailKitEmailService : IEmailService
             mime.References.Add(reference);
 
         var builder = new BodyBuilder { TextBody = message.Body };
-        if (!string.IsNullOrWhiteSpace(message.Body))
+        if (!message.PlainTextOnly && !string.IsNullOrWhiteSpace(message.Body))
         {
             builder.HtmlBody = $"<div dir=\"auto\">{System.Net.WebUtility.HtmlEncode(message.Body).Replace("\r\n", "<br>").Replace("\n", "<br>")}</div>";
         }
