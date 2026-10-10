@@ -38,6 +38,12 @@ public interface ISecureMessageKeyStore
     /// <summary>Every record whose recipients include <paramref name="emailAddress"/>, newest first.</summary>
     Task<IReadOnlyList<SecureMessageKeyRecord>> FindByRecipientAsync(string emailAddress, CancellationToken cancellationToken = default);
 
+    /// <summary>Every record, newest first (used to re-protect stored keys after a PIN reset).</summary>
+    Task<IReadOnlyList<SecureMessageKeyRecord>> GetAllAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>Replaces the key package of one record (after re-protecting it under a new ck1). False if there is no such record.</summary>
+    Task<bool> UpdateKeyPackageAsync(string keyId, byte[] keyPackage, CancellationToken cancellationToken = default);
+
     /// <summary>Removes the record with this key id, if present.</summary>
     Task RemoveAsync(string keyId, CancellationToken cancellationToken = default);
 }

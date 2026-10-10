@@ -77,6 +77,28 @@ public class SecureMessageKeyDatabase : ISecureMessageKeyStore, IFlushableStore,
             .ToList(), cancellationToken);
     }
 
+    public Task<IReadOnlyList<SecureMessageKeyRecord>> GetAllAsync(CancellationToken cancellationToken = default) =>
+        Task.Run(IReadOnlyList<SecureMessageKeyRecord> () => _keys.FindAll()
+            .OrderByDescending(d => d.CreatedUtc)
+            .Select(ToRecord)
+            .ToList(), cancellationToken);
+
+    public Task<bool> UpdateKeyPackageAsync(string keyId, byte[] keyPackage, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(keyId);
+        ArgumentNullException.ThrowIfNull(keyPackage);
+        if (keyPackage.Length == 0)
+            throw new ArgumentException("A key package is required.", nameof(keyPackage));
+
+        return Task.Run(() =>
+        {
+            if (_keys.FindById(keyId) is not { } doc)
+                return false;
+            doc.KeyPackage = keyPackage.ToArray();
+            return _keys.Update(doc);
+        }, cancellationToken);
+    }
+
     public Task RemoveAsync(string keyId, CancellationToken cancellationToken = default) =>
         Task.Run(() => _keys.Delete(keyId), cancellationToken);
 }
