@@ -11,6 +11,7 @@ namespace CORA.Data.Email;
 ///
 /// -----BEGIN CORA MESSAGE-----
 /// Key-Id: 3f2a...
+/// Sender-Id: Qk9C...            (since 2026-10-11: the sending device, for key requests)
 ///
 /// (encrypted body, Base64, 76 characters per line)
 /// -----END CORA MESSAGE-----
@@ -27,13 +28,17 @@ public static class SecureMessageFormat
     public const string BeginMarker = "-----BEGIN CORA MESSAGE-----";
     public const string EndMarker = "-----END CORA MESSAGE-----";
     public const string KeyIdPrefix = "Key-Id: ";
+    public const string SenderIdPrefix = "Sender-Id: ";
     public const int LineLength = 76;
 
     /// <summary>A new random key id (32 hex characters).</summary>
     public static string NewKeyId() => Guid.NewGuid().ToString("N");
 
-    /// <summary>Builds the plain-text email body for an encrypted payload.</summary>
-    public static string Build(string keyId, ReadOnlySpan<byte> payload)
+    /// <summary>
+    /// Builds the plain-text email body for an encrypted payload. <paramref name="senderId"/> is the
+    /// sending device's id at goCORA's key service, so a recipient's key request reaches that device.
+    /// </summary>
+    public static string Build(string keyId, ReadOnlySpan<byte> payload, string? senderId = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(keyId);
         var base64 = Convert.ToBase64String(payload);
@@ -44,6 +49,8 @@ public static class SecureMessageFormat
         sb.Append("\r\n");
         sb.Append(BeginMarker).Append("\r\n");
         sb.Append(KeyIdPrefix).Append(keyId).Append("\r\n");
+        if (!string.IsNullOrWhiteSpace(senderId))
+            sb.Append(SenderIdPrefix).Append(senderId).Append("\r\n");
         sb.Append("\r\n");
         for (var i = 0; i < base64.Length; i += LineLength)
             sb.Append(base64, i, Math.Min(LineLength, base64.Length - i)).Append("\r\n");
@@ -55,9 +62,14 @@ public static class SecureMessageFormat
     /// Finds the encrypted part of a received/sent body. Returns false if the body has no complete
     /// BEGIN/END block, no Key-Id line, or the Base64 is damaged.
     /// </summary>
-    public static bool TryParse(string? body, out string keyId, out byte[] payload)
+    public static bool TryParse(string? body, out string keyId, out byte[] payload) =>
+        TryParse(body, out keyId, out _, out payload);
+
+    /// <summary>As above, also returning the Sender-Id line (empty for messages sent before it existed).</summary>
+    public static bool TryParse(string? body, out string keyId, out string senderId, out byte[] payload)
     {
         keyId = string.Empty;
+        senderId = string.Empty;
         payload = [];
         if (string.IsNullOrEmpty(body))
             return false;
@@ -78,6 +90,8 @@ public static class SecureMessageFormat
                 continue;
             if (line.StartsWith(KeyIdPrefix, StringComparison.Ordinal))
                 keyId = line[KeyIdPrefix.Length..].Trim();
+            else if (line.StartsWith(SenderIdPrefix, StringComparison.Ordinal))
+                senderId = line[SenderIdPrefix.Length..].Trim();
             else
                 base64.Append(line);
         }

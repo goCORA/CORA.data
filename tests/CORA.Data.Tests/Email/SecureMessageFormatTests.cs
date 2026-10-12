@@ -33,6 +33,20 @@ public class SecureMessageFormatTests
       Assert.Equal(new byte[] { 1, 2, 3, 4, 5 }, parsed);
    }
 
+   [Fact]
+   public void SenderId_Line_Is_Written_And_Read_Back_And_Old_Messages_Have_None()
+   {
+      var body = SecureMessageFormat.Build("k2", [9, 8, 7], "QUJDREVGR0hJSktMTU5PUA");
+      Assert.Contains("\r\nKey-Id: k2\r\nSender-Id: QUJDREVGR0hJSktMTU5PUA\r\n", body);
+      Assert.True(SecureMessageFormat.TryParse(body, out var keyId, out var senderId, out var parsed));
+      Assert.Equal("k2", keyId);
+      Assert.Equal("QUJDREVGR0hJSktMTU5PUA", senderId);
+      Assert.Equal(new byte[] { 9, 8, 7 }, parsed);
+
+      Assert.True(SecureMessageFormat.TryParse(SecureMessageFormat.Build("k3", [1]), out _, out var none, out _));
+      Assert.Equal(string.Empty, none);
+   }
+
    [Theory]
    [InlineData(null)]
    [InlineData("")]
