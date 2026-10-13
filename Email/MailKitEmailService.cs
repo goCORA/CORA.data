@@ -2372,6 +2372,109 @@ public class MailKitEmailService : IEmailService
             await messagePart.Message.WriteToAsync(destination, cancellationToken).ConfigureAwait(false);
     }
 
+    // ---- goCORA mailbox registration (claude/design-secure-email-m4-app.md) ------------------
+
+    private const string VerifySender = "noreply@gocora.com";
+    private const string VerifySubjectStart = "goCORA verification code:";
+    private static readonly System.Text.RegularExpressions.Regex VerifySubject =
+        new(@"^goCORA verification code: (\d{6})\s*$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    // The code in a goCORA verification email, or null if it isn't one. A look-alike sent by someone
+    // else gains nothing: the code must match the one goCORA's service issued for this address.
+    private static string? VerificationCodeOf(HeaderList headers)
+    {
+        if (!string.Equals(headers["X-goCORA-Verify"]?.Trim(), "1", StringComparison.Ordinal))
+            return null;
+        if (!InternetAddressList.TryParse(headers[HeaderId.From] ?? string.Empty, out var from)
+            || !from.Mailboxes.Any(m => string.Equals(m.Address, VerifySender, StringComparison.OrdinalIgnoreCase)))
+            return null;
+        var match = VerifySubject.Match(headers[HeaderId.Subject] ?? string.Empty);
+        return match.Success ? match.Groups[1].Value : null;
+    }
+
+    private static DateTimeOffset DateOf(HeaderList headers) =>
+        MimeKit.Utils.DateUtils.TryParse(headers[HeaderId.Date] ?? string.Empty, out var date) ? date : DateTimeOffset.MinValue;
+
+    /// <inheritdoc />
+    public async Task<string?> FindVerificationCodeAsync(MailAccount account, DateTimeOffset sentAfter, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(account);
+        // A little slack for clock differences between goCORA's service and the mail server.
+        var after = sentAfter - TimeSpan.FromMinutes(2);
+        string? code = null;
+        var newest = DateTimeOffset.MinValue;
+        void Consider(string candidate, DateTimeOffset date)
+        {
+            if (date >= after && date >= newest)
+            {
+                newest = date;
+                code = candidate;
+            }
+        }
+
+        if (account.IsPop3)
+        {
+            using var pop3 = await ConnectPop3Async(account, cancellationToken).ConfigureAwait(false);
+            var count = await pop3.GetMessageCountAsync(cancellationToken).ConfigureAwait(false);
+            // The code email is new, so only the most recent messages are looked at.
+            for (var i = count - 1; i >= Math.Max(0, count - 30); i--)
+            {
+                var headers = await pop3.GetMessageHeadersAsync(i, cancellationToken).ConfigureAwait(false);
+                if (VerificationCodeOf(headers) is not { } found)
+                    continue;
+                Consider(found, DateOf(headers));
+                await pop3.DeleteMessageAsync(i, cancellationToken).ConfigureAwait(false);
+            }
+            await pop3.DisconnectAsync(true, cancellationToken).ConfigureAwait(false); // QUIT deletes
+        }
+        else
+        {
+            using var imap = await ConnectImapAsync(account, cancellationToken).ConfigureAwait(false);
+            var folders = new List<IMailFolder> { imap.Inbox };
+            try
+            {
+                if (await FindJunkFolderAsync(imap, cancellationToken).ConfigureAwait(false) is { } junk)
+                    folders.Add(junk);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"FindVerificationCode: junk folder not checked: {ex.Message}");
+            }
+
+            foreach (var folder in folders)
+            {
+                await folder.OpenAsync(FolderAccess.ReadWrite, cancellationToken).ConfigureAwait(false);
+                var query = SearchQuery.SubjectContains(VerifySubjectStart)
+                    .And(SearchQuery.DeliveredAfter(after.UtcDateTime.Date.AddDays(-1)));
+                var uids = await folder.SearchAsync(query, cancellationToken).ConfigureAwait(false);
+                if (uids.Count > 0)
+                {
+                    var summaries = await folder.FetchAsync(uids, MessageSummaryItems.UniqueId | MessageSummaryItems.Headers, cancellationToken)
+                        .ConfigureAwait(false);
+                    var toDelete = new List<UniqueId>();
+                    foreach (var summary in summaries)
+                    {
+                        if (summary.Headers is null || VerificationCodeOf(summary.Headers) is not { } found)
+                            continue;
+                        Consider(found, DateOf(summary.Headers));
+                        toDelete.Add(summary.UniqueId);
+                    }
+                    if (toDelete.Count > 0)
+                    {
+                        await folder.AddFlagsAsync(toDelete, MessageFlags.Deleted, true, cancellationToken).ConfigureAwait(false);
+                        await folder.ExpungeAsync(cancellationToken).ConfigureAwait(false);
+                    }
+                }
+                await folder.CloseAsync(false, cancellationToken).ConfigureAwait(false);
+            }
+            await imap.DisconnectAsync(true, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (code is not null)
+            OnFoldersChanged();
+        return code;
+    }
+
     internal static async Task<ImapClient> ConnectImapAsync(
         MailAccount account, CancellationToken cancellationToken)
     {

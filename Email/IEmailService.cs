@@ -231,4 +231,13 @@ public interface IEmailService
         string folderFullName, IEnumerable<uint> uids, bool isImportant, CancellationToken cancellationToken = default);
 
     Task SendMessageAsync(OutgoingMessage message, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// goCORA mailbox registration: looks in <paramref name="account"/>'s inbox (and junk folder) on the
+    /// server for goCORA's verification-code emails (from noreply@gocora.com, subject
+    /// "goCORA verification code: 123456", header X-goCORA-Verify: 1), deletes every one it finds and
+    /// returns the code of the newest one received after <paramref name="sentAfter"/>, or null.
+    /// Works on any account, not only the current one.
+    /// </summary>
+    Task<string?> FindVerificationCodeAsync(MailAccount account, DateTimeOffset sentAfter, CancellationToken cancellationToken = default);
 }
