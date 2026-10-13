@@ -211,4 +211,10 @@ public class SecureMessageKeyDatabase : ISecureMessageKeyStore, IFlushableStore,
                 AtUtc = d.AtUtc,
             })
             .ToList(), cancellationToken);
+
+    public Task<int> RemoveSharesOlderThanAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default) =>
+        Task.Run(() => _shares.DeleteMany(d => d.AtUtc < cutoffUtc), cancellationToken);
+
+    public Task ClearSharesAsync(CancellationToken cancellationToken = default) =>
+        Task.Run(() => _shares.DeleteAll(), cancellationToken);
 }

@@ -106,4 +106,10 @@ public interface ISecureMessageKeyStore
 
     /// <summary>The keys-shared history, newest first.</summary>
     Task<IReadOnlyList<KeyShareRecord>> GetSharesAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>Removes keys-shared entries older than <paramref name="cutoffUtc"/>; returns how many.</summary>
+    Task<int> RemoveSharesOlderThanAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default);
+
+    /// <summary>Removes the whole keys-shared history.</summary>
+    Task ClearSharesAsync(CancellationToken cancellationToken = default);
 }
