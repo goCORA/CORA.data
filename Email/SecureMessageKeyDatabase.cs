@@ -16,6 +16,7 @@ public class SecureMessageKeyDatabase : ISecureMessageKeyStore, IFlushableStore,
         public string KeyId { get; set; } = string.Empty;
         public string SenderAddress { get; set; } = string.Empty;
         public List<string> Recipients { get; set; } = new();
+        public string Subject { get; set; } = string.Empty;
         public byte[] KeyPackage { get; set; } = [];
         public DateTime CreatedUtc { get; set; }
         public bool Received { get; set; }
@@ -70,6 +71,7 @@ public class SecureMessageKeyDatabase : ISecureMessageKeyStore, IFlushableStore,
         KeyId = d.KeyId,
         SenderAddress = d.SenderAddress,
         Recipients = d.Recipients.ToList(),
+        Subject = d.Subject ?? string.Empty,
         KeyPackage = d.KeyPackage.ToArray(),
         CreatedUtc = d.CreatedUtc,
         Received = d.Received,
@@ -103,6 +105,7 @@ public class SecureMessageKeyDatabase : ISecureMessageKeyStore, IFlushableStore,
                 SenderAddress = SecureMessageFormat.NormalizeAddress(record.SenderAddress),
                 Recipients = record.Recipients.Select(SecureMessageFormat.NormalizeAddress)
                     .Where(a => a.Length > 0).Distinct().ToList(),
+                Subject = record.Subject ?? string.Empty,
                 KeyPackage = record.KeyPackage.ToArray(),
                 CreatedUtc = record.CreatedUtc == default ? DateTime.UtcNow : record.CreatedUtc,
                 Received = record.Received,

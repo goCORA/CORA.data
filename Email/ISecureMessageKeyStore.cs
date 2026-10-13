@@ -17,6 +17,12 @@ public sealed class SecureMessageKeyRecord
     /// <summary>Every To and Bcc address the message was sent to (lower case, no display names).</summary>
     public List<string> Recipients { get; set; } = new();
 
+    /// <summary>
+    /// The sent email's subject, saved at Send Secure so the Keys shared history shows the real subject
+    /// (requests no longer carry one). Empty for received keys and for emails sent before 2026-10-13.
+    /// </summary>
+    public string Subject { get; set; } = string.Empty;
+
     /// <summary>The message key protected with ck1 (see <c>Cora.EncryptSecureMessage</c>).</summary>
     public byte[] KeyPackage { get; set; } = [];
 
