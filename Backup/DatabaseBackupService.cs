@@ -1,19 +1,19 @@
 using System.IO.Compression;
 using CORA.Core.Security;
+using CORA.Data.Contacts;
 using CORA.Data.Email;
 
 namespace CORA.Data.Backup;
 
 /// <summary>
-/// Routines for backing up/restoring CORA's local encrypted database files
-/// and the master encryption key. This class only deals with the file system (via
+/// Routines for backing up/restoring CORA's local encrypted database files (the backup file
+/// itself, protected through the CORA key code, also carries the master key). This class only deals with the file system (via
 /// <see cref="IAppDataLocation"/>) and key storage (via <see cref="ISecureKeyStorage"/>) -
 /// it has no knowledge of any host-app UI/platform concern (file pickers, save dialogs,
 /// etc.), which callers (e.g. CORA.App) are responsible for wiring up. Database files
-/// are zipped/unzipped as-is (they stay encrypted at rest, so the zip itself needs no
-/// extra protection); the master key is exported/imported as a small base64 string.
-/// Restoring either requires an app restart, since the encrypted stores are kept open
-/// for the lifetime of the process.
+/// are zipped/unzipped as-is (they stay encrypted at rest under the master key, which the backup
+/// file carries, sealed under the CORA key code). Restoring requires an app restart, since the
+/// encrypted stores are kept open for the lifetime of the process.
 /// </summary>
 public sealed class DatabaseBackupService
 {
@@ -21,6 +21,7 @@ public sealed class DatabaseBackupService
     private static readonly string[] DatabaseFileNames = StoreFiles.Databases;
 
     private const string AttachmentsDirectoryName = StoreFiles.AttachmentsDirectory;
+    private const string ContactPhotosDirectoryName = ContactPhotoFiles.DirectoryName;
 
     private readonly IAppDataLocation _dataLocation;
     private readonly ISecureKeyStorage _secureKeyStorage;
@@ -35,7 +36,7 @@ public sealed class DatabaseBackupService
     }
 
     /// <summary>
-    /// Zips the local database files (and attachments) into <paramref name="destination"/>.
+    /// Zips the local database files (with mail attachments and contact photos) into <paramref name="destination"/>.
     /// The caller owns <paramref name="destination"/> (e.g. a temp file stream or a
     /// stream backed by a platform save-file dialog).
     /// </summary>
@@ -71,15 +72,49 @@ public sealed class DatabaseBackupService
             }
         }
 
-        var attachmentsDir = Path.Combine(baseDir, AttachmentsDirectoryName);
-        if (Directory.Exists(attachmentsDir))
+        AddDirectory(zip, baseDir, AttachmentsDirectoryName);
+        AddDirectory(zip, baseDir, ContactPhotosDirectoryName);
+    }
+
+    // Entry names always use '/', so a backup made on Windows restores into folders on Android/iOS
+    // (with '\' the files landed in the data folder under names containing backslashes).
+    private static void AddDirectory(ZipArchive zip, string baseDir, string directoryName)
+    {
+        var dir = Path.Combine(baseDir, directoryName);
+        if (!Directory.Exists(dir))
+            return;
+        foreach (var file in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
         {
-            foreach (var file in Directory.EnumerateFiles(attachmentsDir, "*", SearchOption.AllDirectories))
-            {
-                var relative = Path.Combine(AttachmentsDirectoryName, Path.GetRelativePath(attachmentsDir, file));
-                zip.CreateEntryFromFile(file, relative);
-            }
+            var relative = directoryName + "/" + Path.GetRelativePath(dir, file).Replace('\\', '/');
+            zip.CreateEntryFromFile(file, relative, CompressionLevel.Optimal);
         }
+    }
+
+    // An entry's name with '/' separators (older Windows backups used '\').
+    private static string EntryName(ZipArchiveEntry entry) => entry.FullName.Replace('\\', '/');
+
+    private static bool IsIn(string entryName, string directoryName) =>
+        entryName.StartsWith(directoryName + "/", StringComparison.OrdinalIgnoreCase);
+
+    // Where an entry is extracted, or null when its name would leave the data folder ("../").
+    private static string? Destination(string baseDir, string entryName)
+    {
+        var root = Path.GetFullPath(baseDir);
+        var path = Path.GetFullPath(Path.Combine(root, entryName.Replace('/', Path.DirectorySeparatorChar)));
+        var prefix = root.EndsWith(Path.DirectorySeparatorChar) ? root : root + Path.DirectorySeparatorChar;
+        return path.StartsWith(prefix, StringComparison.Ordinal) ? path : null;
+    }
+
+    private static void Extract(ZipArchiveEntry entry, string baseDir, string entryName)
+    {
+        var destinationPath = Destination(baseDir, entryName);
+        if (destinationPath is null)
+            return;
+        var destinationDir = Path.GetDirectoryName(destinationPath);
+        // Only create a subdirectory when the entry lives in one (mail_attachments/…, contact_photos/…).
+        if (!string.IsNullOrEmpty(destinationDir))
+            Directory.CreateDirectory(destinationDir);
+        entry.ExtractToFile(destinationPath, overwrite: true);
     }
 
     /// <summary>
@@ -95,20 +130,10 @@ public sealed class DatabaseBackupService
         using var zip = new ZipArchive(source, ZipArchiveMode.Read, leaveOpen: true);
         foreach (var entry in zip.Entries)
         {
-            if (string.IsNullOrEmpty(entry.Name))
+            var name = EntryName(entry);
+            if (name.Length == 0 || name.EndsWith('/'))
                 continue; // directory entry
-
-            var destinationPath = Path.Combine(baseDir, entry.FullName);
-            var destinationDir = Path.GetDirectoryName(destinationPath);
-
-            // Only create a subdirectory when the entry actually lives in one
-            // (e.g. mail_attachments/…). Root-level .litedb files already sit in baseDir,
-            // which is guaranteed to exist; calling CreateDirectory on it every iteration
-            // was redundant and confusing.
-            if (!string.IsNullOrEmpty(destinationDir) && destinationDir != baseDir)
-                Directory.CreateDirectory(destinationDir);
-
-            entry.ExtractToFile(destinationPath, overwrite: true);
+            Extract(entry, baseDir, name);
         }
     }
 
@@ -150,46 +175,36 @@ public sealed class DatabaseBackupService
         using var zip = new ZipArchive(source, ZipArchiveMode.Read, leaveOpen: true);
         foreach (var entry in zip.Entries)
         {
-            if (string.IsNullOrEmpty(entry.Name))
+            var name = EntryName(entry);
+            if (name.Length == 0 || name.EndsWith('/'))
                 continue; // directory entry
 
-            // Handle attachments: only restore when mailboxes are selected. Attachments
-            // are stored under the AttachmentsDirectoryName subdirectory in the zip.
-            var isAttachment = entry.FullName.StartsWith(AttachmentsDirectoryName + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
-                || entry.FullName.StartsWith(AttachmentsDirectoryName + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
-
-            if (isAttachment && !restoreMailboxes)
+            // Mail attachments come back with the mailboxes, contact photos with the contacts;
+            // everything else must be an allowed top-level database file.
+            if (IsIn(name, AttachmentsDirectoryName))
+            {
+                if (!restoreMailboxes)
+                    continue;
+            }
+            else if (IsIn(name, ContactPhotosDirectoryName))
+            {
+                if (!restoreContacts)
+                    continue;
+            }
+            else if (name.Contains('/') || !allowFiles.Contains(name))
+            {
                 continue;
+            }
 
-            // Only extract entries that correspond to an allowed top-level file, or
-            // attachments (handled above). Entries inside subdirectories (attachments)
-            // will have their FullName preserved.
-            var topLevelName = Path.GetFileName(entry.FullName);
-            if (!isAttachment && !allowFiles.Contains(topLevelName))
-                continue;
-
-            var destinationPath = Path.Combine(baseDir, entry.FullName);
-            var destinationDir = Path.GetDirectoryName(destinationPath);
-
-            if (!string.IsNullOrEmpty(destinationDir) && destinationDir != baseDir)
-                Directory.CreateDirectory(destinationDir);
-
-            entry.ExtractToFile(destinationPath, overwrite: true);
+            Extract(entry, baseDir, name);
         }
     }
 
     /// <summary>
-    /// Creates the encryption-key backup for the signed-in account: the contents of a
-    /// <c>.txt.enc</c> file (the master key, encrypted for the account). No key is returned.
+    /// Restores a goCORA backup file (made through the CORA key code) into <paramref name="destZipPath"/>,
+    /// and adds the master key it carries to this device's retired keys, so the restored database
+    /// files open at the next start. Needs secure email open (see <see cref="AccountBackup.RestoreFileAsync"/>).
     /// </summary>
-    public Task<byte[]> CreateEncryptionKeyBackupAsync(AccountBackupKey accountKey) =>
-        AccountBackup.ExportMasterKeyAsync(_secureKeyStorage, accountKey);
-
-    /// <summary>
-    /// Restores an encryption-key backup made for this account (email address + the PIN/password
-    /// it was made with). Takes effect at the next app start. A wrong email or PIN/password throws
-    /// <see cref="System.Security.Cryptography.CryptographicException"/>.
-    /// </summary>
-    public Task RestoreEncryptionKeyBackupAsync(string accountEmail, string? passphrase, byte[] backup) =>
-        AccountBackup.ImportMasterKeyAsync(_secureKeyStorage, accountEmail, passphrase, backup);
+    public Task RestoreBackupFileAsync(string projectId, string idToken, string sourcePath, string destZipPath, CancellationToken cancellationToken = default) =>
+        AccountBackup.RestoreFileAsync(_secureKeyStorage, projectId, idToken, sourcePath, destZipPath, cancellationToken);
 }

@@ -108,4 +108,63 @@ public class DatabaseBackupServiceTests : IDisposable
          Assert.Equal($"{expected}:{name}", File.ReadAllText(Path.Combine(_dir, name)));
       }
    }
+
+   [Fact]
+   public void ContactPhotos_AreBackedUpWithSlashNames_AndRestoreWithTheContactsToggleOnly()
+   {
+      WriteAllStoreFiles("original");
+      Directory.CreateDirectory(Path.Combine(_dir, "contact_photos"));
+      File.WriteAllText(Path.Combine(_dir, "contact_photos", "a.jpg"), "photo");
+      Directory.CreateDirectory(Path.Combine(_dir, "mail_attachments", "m1"));
+      File.WriteAllText(Path.Combine(_dir, "mail_attachments", "m1", "x.pdf"), "pdf");
+
+      using var backup = BackupOfCurrentFiles();
+      using (var zip = new ZipArchive(backup, ZipArchiveMode.Read, leaveOpen: true))
+      {
+         Assert.Contains(zip.Entries, e => e.FullName == "contact_photos/a.jpg");
+         Assert.Contains(zip.Entries, e => e.FullName == "mail_attachments/m1/x.pdf");
+         Assert.DoesNotContain(zip.Entries, e => e.FullName.Contains('\\'));
+      }
+
+      Directory.Delete(Path.Combine(_dir, "contact_photos"), recursive: true);
+      Directory.Delete(Path.Combine(_dir, "mail_attachments"), recursive: true);
+      backup.Position = 0;
+      _service.RestoreBackupArchive(backup, restoreAccounts: false, restoreTags: false, restoreContacts: false, restoreMailboxes: false,
+         restoreTrustedImageSenders: false, restoreBlacklist: false, restoreAiAutonomy: false, restoreAiResultCache: false);
+      Assert.False(File.Exists(Path.Combine(_dir, "contact_photos", "a.jpg")));
+
+      backup.Position = 0;
+      _service.RestoreBackupArchive(backup, restoreAccounts: false, restoreTags: false, restoreContacts: true, restoreMailboxes: false,
+         restoreTrustedImageSenders: false, restoreBlacklist: false, restoreAiAutonomy: false, restoreAiResultCache: false);
+      Assert.Equal("photo", File.ReadAllText(Path.Combine(_dir, "contact_photos", "a.jpg")));
+      Assert.False(File.Exists(Path.Combine(_dir, "mail_attachments", "m1", "x.pdf")));
+   }
+
+   [Fact]
+   public void Restore_ReadsOldBackslashNames_AndSkipsNamesThatLeaveTheDataFolder()
+   {
+      var stream = new MemoryStream();
+      using (var zip = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true))
+      {
+         void Add(string name, string text)
+         {
+            using var w = new StreamWriter(zip.CreateEntry(name).Open());
+            w.Write(text);
+         }
+         Add("mail_attachments\\m2\\y.txt", "old windows name");
+         Add("../escaped.txt", "outside");
+         Add("contact_photos/../../escaped2.txt", "outside");
+      }
+
+      stream.Position = 0;
+      _service.RestoreBackupArchive(stream);
+      Assert.Equal("old windows name", File.ReadAllText(Path.Combine(_dir, "mail_attachments", "m2", "y.txt")));
+      Assert.False(File.Exists(Path.Combine(Path.GetDirectoryName(_dir)!, "escaped.txt")));
+      Assert.False(File.Exists(Path.Combine(Path.GetDirectoryName(_dir)!, "escaped2.txt")));
+
+      stream.Position = 0;
+      _service.RestoreBackupArchive(stream, restoreAccounts: false, restoreTags: false, restoreContacts: true, restoreMailboxes: true,
+         restoreTrustedImageSenders: false, restoreBlacklist: false, restoreAiAutonomy: false, restoreAiResultCache: false);
+      Assert.False(File.Exists(Path.Combine(Path.GetDirectoryName(_dir)!, "escaped2.txt")));
+   }
 }
