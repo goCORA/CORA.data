@@ -48,10 +48,18 @@ public class SecureMessageKeyDatabase : ISecureMessageKeyStore, IFlushableStore,
         public DateTime AtUtc { get; set; }
     }
 
+    private sealed class CorrespondentDoc
+    {
+        [BsonId]
+        public string Address { get; set; } = string.Empty;
+        public DateTime LastSentUtc { get; set; }
+    }
+
     private readonly EncryptedLiteDbFile _file;
     private readonly ILiteCollection<SecureMessageKeyDoc> _keys;
     private readonly ILiteCollection<KeyRequestDoc> _requests;
     private readonly ILiteCollection<KeyShareDoc> _shares;
+    private readonly ILiteCollection<CorrespondentDoc> _correspondents;
 
     public SecureMessageKeyDatabase(string path)
     {
@@ -59,6 +67,7 @@ public class SecureMessageKeyDatabase : ISecureMessageKeyStore, IFlushableStore,
         _keys = _file.Database.GetCollection<SecureMessageKeyDoc>("SecureMessageKeys");
         _requests = _file.Database.GetCollection<KeyRequestDoc>("KeyRequests");
         _shares = _file.Database.GetCollection<KeyShareDoc>("KeysShared");
+        _correspondents = _file.Database.GetCollection<CorrespondentDoc>("Correspondents");
     }
 
     public void Dispose() => _file.Dispose();
@@ -220,4 +229,26 @@ public class SecureMessageKeyDatabase : ISecureMessageKeyStore, IFlushableStore,
 
     public Task ClearSharesAsync(CancellationToken cancellationToken = default) =>
         Task.Run(() => _shares.DeleteAll(), cancellationToken);
+
+    public Task AddCorrespondentsAsync(IEnumerable<string> addresses, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(addresses);
+        var list = addresses.Select(SecureMessageFormat.NormalizeAddress).Where(a => a.Length > 0).Distinct().ToList();
+        return Task.Run(() =>
+        {
+            var now = DateTime.UtcNow;
+            foreach (var address in list)
+                _correspondents.Upsert(new CorrespondentDoc { Address = address, LastSentUtc = now });
+        }, cancellationToken);
+    }
+
+    public Task<bool> IsKnownCorrespondentAsync(string address, CancellationToken cancellationToken = default)
+    {
+        var a = SecureMessageFormat.NormalizeAddress(address);
+        if (a.Length == 0)
+            return Task.FromResult(false);
+        return Task.Run(() =>
+            _correspondents.FindById(a) is not null
+            || _keys.FindAll().Any(d => d.Received ? d.SenderAddress == a : d.Recipients.Contains(a)), cancellationToken);
+    }
 }

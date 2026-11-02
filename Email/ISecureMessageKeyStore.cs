@@ -118,4 +118,15 @@ public interface ISecureMessageKeyStore
 
     /// <summary>Removes the whole keys-shared history.</summary>
     Task ClearSharesAsync(CancellationToken cancellationToken = default);
+
+    // ---- Known correspondents (claude/design-secure-email-conversations.md) ----
+
+    /// <summary>Remembers that email was sent from this device to these addresses (any email, secure or not).</summary>
+    Task AddCorrespondentsAsync(IEnumerable<string> addresses, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// True when <paramref name="address"/> is a known correspondent: email was sent to it from
+    /// this device, or a key was received from it. Being in Contacts alone doesn't count (Joe 2026-11-02).
+    /// </summary>
+    Task<bool> IsKnownCorrespondentAsync(string address, CancellationToken cancellationToken = default);
 }
