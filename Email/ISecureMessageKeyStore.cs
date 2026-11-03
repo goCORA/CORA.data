@@ -64,8 +64,14 @@ public sealed class KeyShareRecord
     public string Subject { get; set; } = string.Empty;
     /// <summary>The requester's verified addresses, as the key service passed them on.</summary>
     public List<string> RequesterAddresses { get; set; } = new();
-    /// <summary>True: the key was shared; false: the request was declined (no requester address was a recipient).</summary>
+    /// <summary>True: the key was shared; false: the request was declined (no requester address was a recipient,
+    /// or <see cref="DeclinedByYou"/>).</summary>
     public bool Shared { get; set; }
+    /// <summary>
+    /// True when the user declined it ("Don't answer" after "Security key changed"), rather than goCORA
+    /// (not a recipient). Older entries read as false.
+    /// </summary>
+    public bool DeclinedByYou { get; set; }
     public DateTime AtUtc { get; set; }
 }
 
