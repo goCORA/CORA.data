@@ -226,7 +226,8 @@ public class SyncStoresTests : IDisposable
         await state.SetKindAsync(new SyncKindState { Kind = "contacts", HighestVersionSeen = 7, AppliedVersion = 6 });
         var changed = new DateTime(2026, 11, 4, 12, 0, 0, DateTimeKind.Utc);
         await state.SaveItemsAsync("contacts", [new SyncItemState { ItemId = "a", Revision = 3, DeviceId = "d1", Hash = "h", ChangedUtc = changed }]);
-        await state.AddSkippedAccountAsync(" Work@X.com ");
+        await state.SetHeldAccountAsync(new SyncHeldAccount { Email = " Work@X.com ", State = SyncHeldState.Skipped, Data = "{}" });
+        await state.SetValueAsync("passwords", "off");
         await state.SetPendingTagAsync(new SyncPendingTag { AccountKey = "a@x.com", MessageId = "<m>", TagId = "t1" });
 
         Close();
@@ -238,7 +239,9 @@ public class SyncStoresTests : IDisposable
         Assert.Equal(("a", 3L, "d1", "h", false), (item.ItemId, item.Revision, item.DeviceId, item.Hash, item.Deleted));
         Assert.Equal(changed, item.ChangedUtc);
         Assert.Empty(await state.GetItemsAsync("tags"));
-        Assert.Equal(new[] { "work@x.com" }, await state.GetSkippedAccountsAsync());
+        var held = Assert.Single(await state.GetHeldAccountsAsync());
+        Assert.Equal(("work@x.com", SyncHeldState.Skipped, "{}"), (held.Email, held.State, held.Data));
+        Assert.Equal("off", await state.GetValueAsync("passwords"));
         Assert.Equal("t1", Assert.Single(await state.GetPendingTagsAsync()).TagId);
     }
 
@@ -279,9 +282,9 @@ public class SyncStoresTests : IDisposable
         await state.RemovePendingTagAsync("a", "m");
         Assert.Empty(await state.GetPendingTagsAsync());
 
-        await state.AddSkippedAccountAsync("a@x.com");
-        await state.RemoveSkippedAccountAsync("A@X.com");
-        Assert.Empty(await state.GetSkippedAccountsAsync());
+        await state.SetHeldAccountAsync(new SyncHeldAccount { Email = "a@x.com", State = SyncHeldState.WaitingRemove });
+        await state.RemoveHeldAccountAsync("A@X.com");
+        Assert.Empty(await state.GetHeldAccountsAsync());
     }
 
     [Fact]
@@ -291,14 +294,14 @@ public class SyncStoresTests : IDisposable
         await state.SetOwnerAsync("uid1");
         await state.SetKindAsync(new SyncKindState { Kind = "tags", HighestVersionSeen = 5 });
         await state.SaveItemsAsync("tags", [new SyncItemState { ItemId = "a" }]);
-        await state.AddSkippedAccountAsync("a@x.com");
+        await state.SetHeldAccountAsync(new SyncHeldAccount { Email = "a@x.com" });
         await state.SetPendingTagAsync(new SyncPendingTag { AccountKey = "a", MessageId = "m", TagId = "t" });
 
         await state.ResetAsync();
         Assert.Null(await state.GetOwnerAsync());
         Assert.Equal(0, (await state.GetKindAsync("tags")).HighestVersionSeen);
         Assert.Empty(await state.GetItemsAsync("tags"));
-        Assert.Empty(await state.GetSkippedAccountsAsync());
+        Assert.Empty(await state.GetHeldAccountsAsync());
         Assert.Empty(await state.GetPendingTagsAsync());
     }
 

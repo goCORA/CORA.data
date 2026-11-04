@@ -61,6 +61,13 @@ public interface ISyncAdapter
     Task AlignAsync(IReadOnlyDictionary<string, string> cloudItems, CancellationToken cancellationToken);
 
     Task ApplyAsync(IReadOnlyDictionary<string, string> upserts, IReadOnlyCollection<string> deletes, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Items that exist in the cloud and are deliberately not on this device. They aren't in
+    /// <see cref="ReadAsync"/>, and that must not read as a deletion.
+    /// </summary>
+    Task<IReadOnlySet<string>> GetElsewhereAsync(CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlySet<string>>(new HashSet<string>());
 }
 
 public enum SyncKindOutcome

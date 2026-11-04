@@ -66,6 +66,8 @@ public class SyncEngineTests
         public Dictionary<string, string> Items { get; } = [];
         public Dictionary<string, string> Rename { get; } = [];
         public string Kind => kind;
+        public HashSet<string> Elsewhere { get; } = [];
+        public Task<IReadOnlySet<string>> GetElsewhereAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlySet<string>>(Elsewhere);
         public Task<Dictionary<string, string>> ReadAsync(CancellationToken cancellationToken) => Task.FromResult(new Dictionary<string, string>(Items));
 
         public Task AlignAsync(IReadOnlyDictionary<string, string> cloudItems, CancellationToken cancellationToken)
@@ -107,9 +109,11 @@ public class SyncEngineTests
             return Task.CompletedTask;
         }
         public Task<int> PurgeDeletedAsync(DateTime beforeUtc, CancellationToken cancellationToken = default) => Task.FromResult(0);
-        public Task<List<string>> GetSkippedAccountsAsync(CancellationToken cancellationToken = default) => Task.FromResult(new List<string>());
-        public Task AddSkippedAccountAsync(string emailAddress, CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task RemoveSkippedAccountAsync(string emailAddress, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task<List<SyncHeldAccount>> GetHeldAccountsAsync(CancellationToken cancellationToken = default) => Task.FromResult(new List<SyncHeldAccount>());
+        public Task SetHeldAccountAsync(SyncHeldAccount account, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task RemoveHeldAccountAsync(string emailAddress, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task<string?> GetValueAsync(string key, CancellationToken cancellationToken = default) => Task.FromResult<string?>(null);
+        public Task SetValueAsync(string key, string value, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task<List<SyncPendingTag>> GetPendingTagsAsync(CancellationToken cancellationToken = default) => Task.FromResult(new List<SyncPendingTag>());
         public Task SetPendingTagAsync(SyncPendingTag tag, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task RemovePendingTagAsync(string accountKey, string messageId, CancellationToken cancellationToken = default) => Task.CompletedTask;
@@ -288,6 +292,26 @@ public class SyncEngineTests
 
         Assert.Equal(new Dictionary<string, string> { ["cloud-id"] = "Anna" }, phone.Data.Items);
         Assert.Equal(1, cloud.Uploads);
+    }
+
+    [Fact]
+    public async Task AnItemHeldAwayFromThisDevice_IsNotADeletion_AndSurvivesItsUploads()
+    {
+        var cloud = new FakeCloud();
+        var (pc, phone) = (new Device(cloud, "pc"), new Device(cloud, "phone"));
+        pc.Data.Items["a"] = "Anna";
+        pc.Data.Items["secret"] = "held";
+        await pc.SyncAsync();
+        await phone.SyncAsync();
+
+        phone.Data.Items.Remove("secret");
+        phone.Data.Elsewhere.Add("secret");
+        phone.Data.Items["b"] = "Ben";
+        await phone.SyncAsync();
+        await pc.SyncAsync();
+
+        Assert.Equal("held", pc.Data.Items["secret"]);
+        Assert.Equal("Ben", pc.Data.Items["b"]);
     }
 
     [Fact]

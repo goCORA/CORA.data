@@ -28,6 +28,9 @@ public class AccountCredentialDatabase : ICredentialStore, IFlushableStore, IDis
         BsonMapper.Global.Entity<MailAccount>().Id(a => a.EmailAddress, autoId: false);
     }
 
+    /// <summary>Raised after a change that sync carries to other devices.</summary>
+    internal Action? Changed { get; set; }
+
     public AccountCredentialDatabase(string path, ISecureKeyStorage legacySecureStorage, IPreferenceStore preferences)
     {
         _file = EncryptedLiteDbFile.Open(path);
@@ -58,6 +61,7 @@ public class AccountCredentialDatabase : ICredentialStore, IFlushableStore, IDis
         return Task.Run(() =>
         {
             _accounts.Upsert(account);
+            Changed?.Invoke();
         });
     }
 
@@ -68,6 +72,7 @@ public class AccountCredentialDatabase : ICredentialStore, IFlushableStore, IDis
         return Task.Run(() =>
         {
             _accounts.Delete(email);
+            Changed?.Invoke();
         });
     }
 

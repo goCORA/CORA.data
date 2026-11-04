@@ -41,6 +41,35 @@ public sealed class SyncKindState
     public bool NeedsUpload { get; set; }
 }
 
+public enum SyncHeldState
+{
+    /// <summary>A new account, waiting for the confirmation.</summary>
+    WaitingAdd,
+
+    /// <summary>On the other devices, and not wanted here ("Synced accounts not on this device").</summary>
+    Skipped,
+
+    /// <summary>A server change, waiting for Accept or Reject.</summary>
+    WaitingChange,
+
+    /// <summary>A server change this device rejected: it stays as it is.</summary>
+    RejectedChange,
+
+    /// <summary>Removed elsewhere, waiting for Accept or Reject.</summary>
+    WaitingRemove,
+
+    /// <summary>A removal this device rejected: the account stays here only.</summary>
+    RejectedRemove,
+}
+
+/// <summary>A mail account sync hasn't applied here. Settings only: never a password or token.</summary>
+public sealed class SyncHeldAccount
+{
+    public string Email { get; set; } = string.Empty;
+    public SyncHeldState State { get; set; }
+    public string? Data { get; set; }
+}
+
 /// <summary>A tag from another device, waiting for its email to arrive here.</summary>
 public sealed class SyncPendingTag
 {
@@ -71,10 +100,14 @@ public interface ISyncStateStore
     /// <summary>Removes deletion markers older than <paramref name="beforeUtc"/>; returns how many.</summary>
     Task<int> PurgeDeletedAsync(DateTime beforeUtc, CancellationToken cancellationToken = default);
 
-    /// <summary>Mail accounts that exist in sync but that this device chose not to have.</summary>
-    Task<List<string>> GetSkippedAccountsAsync(CancellationToken cancellationToken = default);
-    Task AddSkippedAccountAsync(string emailAddress, CancellationToken cancellationToken = default);
-    Task RemoveSkippedAccountAsync(string emailAddress, CancellationToken cancellationToken = default);
+    /// <summary>Mail accounts waiting for an answer, skipped or rejected on this device.</summary>
+    Task<List<SyncHeldAccount>> GetHeldAccountsAsync(CancellationToken cancellationToken = default);
+    Task SetHeldAccountAsync(SyncHeldAccount account, CancellationToken cancellationToken = default);
+    Task RemoveHeldAccountAsync(string emailAddress, CancellationToken cancellationToken = default);
+
+    /// <summary>A small named value, or null.</summary>
+    Task<string?> GetValueAsync(string key, CancellationToken cancellationToken = default);
+    Task SetValueAsync(string key, string value, CancellationToken cancellationToken = default);
 
     Task<List<SyncPendingTag>> GetPendingTagsAsync(CancellationToken cancellationToken = default);
 
@@ -95,7 +128,7 @@ public class SyncStateDatabase : ISyncStateStore, IFlushableStore, IDisposable
     private readonly ILiteCollection<MetaDoc> _meta;
     private readonly ILiteCollection<KindDoc> _kinds;
     private readonly ILiteCollection<ItemDoc> _items;
-    private readonly ILiteCollection<SkippedDoc> _skipped;
+    private readonly ILiteCollection<HeldDoc> _held;
     private readonly ILiteCollection<PendingTagDoc> _pendingTags;
 
     public SyncStateDatabase(string path)
@@ -105,7 +138,7 @@ public class SyncStateDatabase : ISyncStateStore, IFlushableStore, IDisposable
         _kinds = _file.Database.GetCollection<KindDoc>("Kinds");
         _items = _file.Database.GetCollection<ItemDoc>("Items");
         _items.EnsureIndex(i => i.Kind);
-        _skipped = _file.Database.GetCollection<SkippedDoc>("SkippedAccounts");
+        _held = _file.Database.GetCollection<HeldDoc>("HeldAccounts");
         _pendingTags = _file.Database.GetCollection<PendingTagDoc>("PendingTags");
     }
 
@@ -185,14 +218,22 @@ public class SyncStateDatabase : ISyncStateStore, IFlushableStore, IDisposable
     public Task<int> PurgeDeletedAsync(DateTime beforeUtc, CancellationToken cancellationToken = default) =>
         Task.Run(() => _items.DeleteMany(i => i.Deleted && i.ChangedUtc < beforeUtc), cancellationToken);
 
-    public Task<List<string>> GetSkippedAccountsAsync(CancellationToken cancellationToken = default) =>
-        Task.Run(() => _skipped.FindAll().Select(s => s.Address).ToList(), cancellationToken);
+    public Task<List<SyncHeldAccount>> GetHeldAccountsAsync(CancellationToken cancellationToken = default) =>
+        Task.Run(() => _held.FindAll()
+            .Select(h => new SyncHeldAccount { Email = h.Email, State = h.State, Data = h.Data })
+            .ToList(), cancellationToken);
 
-    public Task AddSkippedAccountAsync(string emailAddress, CancellationToken cancellationToken = default) =>
-        Task.Run(() => _skipped.Upsert(new SkippedDoc { Address = Normalize(emailAddress) }), cancellationToken);
+    public Task SetHeldAccountAsync(SyncHeldAccount account, CancellationToken cancellationToken = default) =>
+        Task.Run(() => _held.Upsert(new HeldDoc { Email = Normalize(account.Email), State = account.State, Data = account.Data }), cancellationToken);
 
-    public Task RemoveSkippedAccountAsync(string emailAddress, CancellationToken cancellationToken = default) =>
-        Task.Run(() => _skipped.Delete(Normalize(emailAddress)), cancellationToken);
+    public Task RemoveHeldAccountAsync(string emailAddress, CancellationToken cancellationToken = default) =>
+        Task.Run(() => _held.Delete(Normalize(emailAddress)), cancellationToken);
+
+    public Task<string?> GetValueAsync(string key, CancellationToken cancellationToken = default) =>
+        Task.Run(() => _meta.FindById(key)?.Value, cancellationToken);
+
+    public Task SetValueAsync(string key, string value, CancellationToken cancellationToken = default) =>
+        Task.Run(() => _meta.Upsert(new MetaDoc { Key = key, Value = value }), cancellationToken);
 
     public Task<List<SyncPendingTag>> GetPendingTagsAsync(CancellationToken cancellationToken = default) =>
         Task.Run(() => _pendingTags.FindAll()
@@ -217,7 +258,7 @@ public class SyncStateDatabase : ISyncStateStore, IFlushableStore, IDisposable
             _meta.DeleteAll();
             _kinds.DeleteAll();
             _items.DeleteAll();
-            _skipped.DeleteAll();
+            _held.DeleteAll();
             _pendingTags.DeleteAll();
         }, cancellationToken);
 
@@ -250,10 +291,12 @@ public class SyncStateDatabase : ISyncStateStore, IFlushableStore, IDisposable
         public DateTime ChangedUtc { get; set; }
     }
 
-    private sealed class SkippedDoc
+    private sealed class HeldDoc
     {
         [BsonId]
-        public string Address { get; set; } = string.Empty;
+        public string Email { get; set; } = string.Empty;
+        public SyncHeldState State { get; set; }
+        public string? Data { get; set; }
     }
 
     private sealed class PendingTagDoc

@@ -181,7 +181,9 @@ public sealed class SecureDataStores : IDataStores, IDisposable
             ScheduleContactsFlush();
             SyncableDataChanged?.Invoke();
         };
-        _tags.Changed = _blacklist.Changed = _trustedImageSenders.Changed = () => SyncableDataChanged?.Invoke();
+        _tags.Changed = _blacklist.Changed = _trustedImageSenders.Changed = _accounts.Changed = () => SyncableDataChanged?.Invoke();
+        _hiddenFolders.Changed += (_, _) => SyncableDataChanged?.Invoke();
+        _folderOrder.Changed += (_, _) => SyncableDataChanged?.Invoke();
     }
 
     private void ScheduleContactsFlush()

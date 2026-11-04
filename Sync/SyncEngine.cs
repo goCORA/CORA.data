@@ -171,6 +171,7 @@ public sealed class SyncEngine
         }
 
         var local = await adapter.ReadAsync(cancellationToken).ConfigureAwait(false);
+        var elsewhere = await adapter.GetElsewhereAsync(cancellationToken).ConfigureAwait(false);
         var now = _utcNow();
 
         // What this device has, with its own edits and deletions as new revisions.
@@ -182,7 +183,7 @@ public sealed class SyncEngine
                 ? new Item { Id = id, Rev = (k?.Revision ?? 0) + 1, Dev = _deviceId, At = now, Data = data }
                 : new Item { Id = id, Rev = k!.Revision, Dev = k.DeviceId, At = k.ChangedUtc, Data = data };
         }
-        foreach (var k in known.Values.Where(k => !local.ContainsKey(k.ItemId)))
+        foreach (var k in known.Values.Where(k => !local.ContainsKey(k.ItemId) && !elsewhere.Contains(k.ItemId)))
         {
             mine[k.ItemId] = k.Deleted
                 ? new Item { Id = k.ItemId, Rev = k.Revision, Dev = k.DeviceId, At = k.ChangedUtc, Del = true }
