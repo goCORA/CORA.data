@@ -59,6 +59,9 @@ public class TrustedImageSenderDatabase : ITrustedImageSenderStore, IFlushableSt
             return doc?.Trusted ?? false;
         }, cancellationToken);
 
+    public Task<List<string>> GetTrustedSendersAsync(CancellationToken cancellationToken = default) =>
+        Task.Run(() => _senders.Find(s => s.Trusted).Select(s => s.SenderEmail).ToList(), cancellationToken);
+
     public Task SetTrustedAsync(string senderEmail, bool trusted, CancellationToken cancellationToken = default) =>
         Task.Run(() =>
         {

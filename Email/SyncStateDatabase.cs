@@ -36,6 +36,9 @@ public sealed class SyncKindState
 
     /// <summary>The version last merged into this device.</summary>
     public long AppliedVersion { get; set; }
+
+    /// <summary>This device has merged changes the cloud doesn't have yet (an upload failed or lost the race).</summary>
+    public bool NeedsUpload { get; set; }
 }
 
 /// <summary>A tag from another device, waiting for its email to arrive here.</summary>
@@ -133,6 +136,7 @@ public class SyncStateDatabase : ISyncStateStore, IFlushableStore, IDisposable
                 Kind = kind,
                 HighestVersionSeen = doc?.HighestVersionSeen ?? 0,
                 AppliedVersion = doc?.AppliedVersion ?? 0,
+                NeedsUpload = doc?.NeedsUpload ?? false,
             };
         }, cancellationToken);
 
@@ -145,6 +149,7 @@ public class SyncStateDatabase : ISyncStateStore, IFlushableStore, IDisposable
                 Kind = state.Kind,
                 HighestVersionSeen = Math.Max(seen, state.HighestVersionSeen),
                 AppliedVersion = state.AppliedVersion,
+                NeedsUpload = state.NeedsUpload,
             });
         }, cancellationToken);
 
@@ -229,6 +234,7 @@ public class SyncStateDatabase : ISyncStateStore, IFlushableStore, IDisposable
         public string Kind { get; set; } = string.Empty;
         public long HighestVersionSeen { get; set; }
         public long AppliedVersion { get; set; }
+        public bool NeedsUpload { get; set; }
     }
 
     private sealed class ItemDoc

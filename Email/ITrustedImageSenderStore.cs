@@ -10,6 +10,9 @@ public interface ITrustedImageSenderStore
     /// <summary>Returns whether remote images should be auto-displayed for the given sender address.</summary>
     Task<bool> IsTrustedAsync(string senderEmail, CancellationToken cancellationToken = default);
 
+    /// <summary>Returns every sender marked as trusted.</summary>
+    Task<List<string>> GetTrustedSendersAsync(CancellationToken cancellationToken = default);
+
     /// <summary>Marks the given sender address as trusted (or not) for auto-displaying remote images.</summary>
     Task SetTrustedAsync(string senderEmail, bool trusted, CancellationToken cancellationToken = default);
 
