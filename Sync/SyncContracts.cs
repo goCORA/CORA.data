@@ -17,6 +17,9 @@ public interface ISyncCloud
     /// <summary>Fetches every part of a version and joins them.</summary>
     Task<byte[]> DownloadAsync(string kind, SyncCloudVersion version, CancellationToken cancellationToken);
 
+    /// <summary>The daily copy of this version, for undo.</summary>
+    Task<SyncCloudVersion> GetDailyCopyAsync(string kind, long version, CancellationToken cancellationToken);
+
     /// <summary>Stores a sealed blob as <paramref name="version"/>. Throws <see cref="SyncVersionOutdatedException"/>.</summary>
     Task UploadAsync(string kind, long version, long generation, byte[] blob, CancellationToken cancellationToken);
 }
@@ -77,6 +80,12 @@ public enum SyncKindOutcome
 
 /// <summary>What a kind's sync would delete here, for the "are you sure?" question.</summary>
 public sealed record SyncKindResult(string Kind, SyncKindOutcome Outcome, int Deletions = 0);
+
+/// <summary>The user deleted the cloud copy on another device: sync stops here too.</summary>
+public sealed class SyncCloudCopyDeletedException : Exception;
+
+/// <summary>A daily copy kept for undo. <see cref="Until"/> is when that version was replaced.</summary>
+public sealed record SyncDailyCopy(string Kind, long Version, long Generation, int Parts, string? UploadId, DateTimeOffset Until);
 
 /// <summary>This device holds another goCORA account's sync state: the user must choose.</summary>
 public sealed class SyncOwnerMismatchException : Exception;

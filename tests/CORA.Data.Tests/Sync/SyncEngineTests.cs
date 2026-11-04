@@ -22,12 +22,12 @@ public class SyncEngineTests
 
         public Task<IReadOnlyDictionary<string, SyncCloudVersion>> GetStatusAsync(CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyDictionary<string, SyncCloudVersion>>(
-                Stored.ToDictionary(s => s.Key, s => new SyncCloudVersion(s.Value.Version, s.Value.Gen, s.Value.Blob.Length == 0 ? 0 : 1, "u")));
+                Stored.Where(s => !s.Key.StartsWith("daily:", StringComparison.Ordinal)).ToDictionary(s => s.Key, s => new SyncCloudVersion(s.Value.Version, s.Value.Gen, s.Value.Blob.Length == 0 ? 0 : 1, "u")));
 
         public Task<byte[]> DownloadAsync(string kind, SyncCloudVersion version, CancellationToken cancellationToken)
         {
             Downloads++;
-            return Task.FromResult(Stored[kind].Blob);
+            return Task.FromResult(Daily.TryGetValue((kind, version.Version), out var copy) ? copy : Stored[kind].Blob);
         }
 
         public Task UploadAsync(string kind, long version, long generation, byte[] blob, CancellationToken cancellationToken)
@@ -45,6 +45,14 @@ public class SyncEngineTests
             Uploads++;
             Stored[kind] = (version, generation, blob);
             return Task.CompletedTask;
+        }
+
+        public Dictionary<(string Kind, long Version), byte[]> Daily { get; } = [];
+
+        public Task<SyncCloudVersion> GetDailyCopyAsync(string kind, long version, CancellationToken cancellationToken)
+        {
+            Stored["daily:" + kind] = (version, Generation, Daily[(kind, version)]);
+            return Task.FromResult(new SyncCloudVersion(version, Generation, 1, "u"));
         }
 
         public byte[] Seal(byte[] snapshot, string kind, long version) => (byte[])snapshot.Clone();
@@ -114,8 +122,10 @@ public class SyncEngineTests
         public MemoryAdapter Data { get; } = new();
         public MemoryState State { get; } = new();
 
-        public async Task<SyncKindResult> SyncAsync(IReadOnlySet<string>? allow = null) =>
-            (await new SyncEngine(State, cloud, cloud, id).RunAsync([Data], allow)).Single();
+        public async Task<SyncKindResult> SyncAsync(IReadOnlySet<string>? allow = null, bool fresh = false) =>
+            (await new SyncEngine(State, cloud, cloud, id).RunAsync([Data], allow, fresh)).Single();
+
+        public Task ApplyCopyAsync(long version) => new SyncEngine(State, cloud, cloud, id).ApplyCopyAsync(Data, version);
     }
 
     [Fact]
@@ -357,15 +367,59 @@ public class SyncEngineTests
     }
 
     [Fact]
-    public async Task AfterTheCloudCopyIsDeleted_VersionsKeepGoingUp()
+    public async Task AfterTheCloudCopyIsDeleted_DevicesStop_AndTurningSyncBackOnStartsAgain()
     {
         var cloud = new FakeCloud();
         var pc = new Device(cloud, "pc");
         pc.Data.Items["a"] = "Anna";
         await pc.SyncAsync();
         cloud.Stored["contacts"] = (1, 1, []);
-        await pc.SyncAsync();
+
+        await Assert.ThrowsAsync<SyncCloudCopyDeletedException>(() => pc.SyncAsync());
+        Assert.Equal("Anna", pc.Data.Items["a"]);
+        Assert.Empty(cloud.Stored["contacts"].Blob);
+
+        await pc.SyncAsync(fresh: true);
         Assert.Equal(2, cloud.Stored["contacts"].Version);
         Assert.NotEmpty(cloud.Stored["contacts"].Blob);
+        await pc.SyncAsync();
+    }
+
+    [Fact]
+    public async Task ADeletedCloudCopy_DoesNotStopADeviceThatNeverSynced()
+    {
+        var cloud = new FakeCloud();
+        cloud.Stored["contacts"] = (1, 1, []);
+        var phone = new Device(cloud, "phone");
+        phone.Data.Items["a"] = "Anna";
+        await phone.SyncAsync();
+        Assert.Equal(2, cloud.Stored["contacts"].Version);
+    }
+
+    [Fact]
+    public async Task Undo_BringsADailyCopyBack_OnEveryDevice()
+    {
+        var cloud = new FakeCloud();
+        var (pc, phone) = (new Device(cloud, "pc"), new Device(cloud, "phone"));
+        pc.Data.Items["a"] = "Anna";
+        pc.Data.Items["b"] = "Ben";
+        await pc.SyncAsync();
+        await phone.SyncAsync();
+        cloud.Daily[("contacts", 1)] = cloud.Stored["contacts"].Blob;
+
+        pc.Data.Items["a"] = "wrong";
+        pc.Data.Items.Remove("b");
+        pc.Data.Items["c"] = "added by mistake";
+        await pc.SyncAsync();
+        await phone.SyncAsync();
+        Assert.Equal("wrong", phone.Data.Items["a"]);
+
+        await phone.ApplyCopyAsync(1);
+        await phone.SyncAsync();
+        await pc.SyncAsync();
+
+        var before = new Dictionary<string, string> { ["a"] = "Anna", ["b"] = "Ben" };
+        Assert.Equal(before, phone.Data.Items);
+        Assert.Equal(before, pc.Data.Items);
     }
 }

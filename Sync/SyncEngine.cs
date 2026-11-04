@@ -51,10 +51,12 @@ public sealed class SyncEngine
 
     /// <summary>
     /// Runs every kind. <paramref name="allowMassDelete"/> names kinds the user has confirmed.
-    /// Throws <see cref="SyncOwnerMismatchException"/> before anything is touched.
+    /// <paramref name="freshStart"/>: sync was just turned on, so a deleted cloud copy is simply
+    /// started again. Throws <see cref="SyncOwnerMismatchException"/> and
+    /// <see cref="SyncCloudCopyDeletedException"/> before anything is touched.
     /// </summary>
     public async Task<IReadOnlyList<SyncKindResult>> RunAsync(
-        IEnumerable<ISyncAdapter> adapters, IReadOnlySet<string>? allowMassDelete = null, CancellationToken cancellationToken = default)
+        IEnumerable<ISyncAdapter> adapters, IReadOnlySet<string>? allowMassDelete = null, bool freshStart = false, CancellationToken cancellationToken = default)
     {
         var owner = await _state.GetOwnerAsync(cancellationToken).ConfigureAwait(false);
         if (owner is not null && owner != _sealer.Group)
@@ -64,13 +66,52 @@ public sealed class SyncEngine
 
         await _state.PurgeDeletedAsync(_utcNow() - DeletionMarkerAge, cancellationToken).ConfigureAwait(false);
         var status = await _cloud.GetStatusAsync(cancellationToken).ConfigureAwait(false);
+        var kinds = adapters.ToList();
+        if (!freshStart)
+        {
+            // Without this, a device that still has the data would upload it straight back.
+            foreach (var adapter in kinds)
+            {
+                if (status.TryGetValue(adapter.Kind, out var c) && c.Parts == 0
+                    && (await _state.GetKindAsync(adapter.Kind, cancellationToken).ConfigureAwait(false)).AppliedVersion > 0)
+                {
+                    throw new SyncCloudCopyDeletedException();
+                }
+            }
+        }
+
         var results = new List<SyncKindResult>();
-        foreach (var adapter in adapters)
+        foreach (var adapter in kinds)
         {
             status.TryGetValue(adapter.Kind, out var cloud);
             results.Add(await RunKindAsync(adapter, cloud, allowMassDelete?.Contains(adapter.Kind) == true, cancellationToken).ConfigureAwait(false));
         }
         return results;
+    }
+
+    /// <summary>
+    /// Undo: makes this device match a daily copy. The next run sees the difference as this device's
+    /// own edits, with revisions above the cloud's, and takes it to every device.
+    /// </summary>
+    public async Task ApplyCopyAsync(ISyncAdapter adapter, long version, CancellationToken cancellationToken = default)
+    {
+        var copy = await _cloud.GetDailyCopyAsync(adapter.Kind, version, cancellationToken).ConfigureAwait(false);
+        var blob = await _cloud.DownloadAsync(adapter.Kind, copy, cancellationToken).ConfigureAwait(false);
+        var plain = await _sealer.OpenAsync(blob, adapter.Kind, version, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var snapshot = JsonSerializer.Deserialize<Snapshot>(plain) ?? throw new InvalidDataException("An empty sync snapshot.");
+            var wanted = snapshot.Items.Where(i => !i.Del && i.Data is not null).ToDictionary(i => i.Id, i => i.Data!);
+            var local = await adapter.ReadAsync(cancellationToken).ConfigureAwait(false);
+            await adapter.ApplyAsync(
+                wanted.Where(w => !local.TryGetValue(w.Key, out var d) || d != w.Value).ToDictionary(w => w.Key, w => w.Value),
+                local.Keys.Where(id => !wanted.ContainsKey(id)).ToList(),
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(plain);
+        }
     }
 
     private static string Hash(string data) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(data)));
