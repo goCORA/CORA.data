@@ -241,6 +241,21 @@ public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
             .Select(s => new MailMessageIdentity { FolderName = s.FolderName, Uid = s.Uid, MessageId = s.MessageId })
             .ToList(), cancellationToken);
 
+    public Task MarkLocalOnlyAsync(
+        string accountKey, string folderFullName, IEnumerable<string> uidls,
+        CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            foreach (var uidl in uidls)
+            {
+                var doc = _summaries.FindById(MakeKey(accountKey, folderFullName, uidl));
+                if (doc is null || doc.IsLocalOnly)
+                    continue;
+                doc.IsLocalOnly = true;
+                _summaries.Update(doc);
+            }
+        }, cancellationToken);
+
     private static string MakeKey(string accountKey, string folderFullName, string uidl) =>
         string.Join("|", accountKey, folderFullName, uidl);
 

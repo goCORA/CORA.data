@@ -50,11 +50,10 @@ public class MailKitEmailService : IEmailService
     internal const string SentFolderName = "Sent";
 
     /// <summary>
-    /// Local-only virtual folder (POP3 only) that holds deleted and orphaned messages so
-    /// they are never permanently lost. Deleting a POP3 message, or discovering during a
-    /// refresh that a locally-cached message no longer exists on the server, moves the
-    /// message here instead of removing it outright. Because deleted/orphaned messages no
-    /// longer have a reliable server UIDL, entries in this folder are stored without one.
+    /// Local-only virtual folder (POP3 only) that holds deleted messages so they are never
+    /// permanently lost. Deleting a POP3 message moves it here instead of removing it outright.
+    /// A message the server no longer has stays where it is (see SyncFolderAsync). Because
+    /// deleted messages no longer have a reliable server UIDL, entries here are stored without one.
     /// </summary>
     internal const string TrashFolderName = "Trash";
 
@@ -920,28 +919,17 @@ public class MailKitEmailService : IEmailService
         await AutoJunkBlacklistedAsync(accountKey, pop3Folder, newSummaries, cancellationToken)
             .ConfigureAwait(false);
 
-        // Prune local summaries that are orphaned: their body was never (and can never be)
-        // cached because the message is no longer on the server to re-fetch, or the message
-        // was known locally but the server no longer has it (e.g. deleted from another
-        // client). Rather than losing such entries outright, move them into the local
-        // Trash folder so nothing the user had is silently lost.
-        //
-        // Locally-moved rows (e.g. a message moved back from Trash into Inbox) are keyed
-        // by a locally-generated id that will never appear in the server's UIDL list, so
-        // they must be excluded here - otherwise every sync would immediately treat them
-        // as orphaned and move them straight back to Trash.
+        // Mail the server no longer has stays where it is (Joe 2026-11-04). On POP3 the copy here
+        // is the user's mail, and goCORA can't tell why the server's copy went: a delete elsewhere,
+        // or the provider's own clean-up. It just becomes local-only, so later syncs leave it alone.
         var localOnlyUidls = cachedSummaries.Where(s => s.IsLocalOnly).Select(s => s.Uidl).ToHashSet();
-        var serverUidlSet = serverUidls.ToHashSet();
-        var unrepairable = missingBodyUidls.Where(uidl => !serverUidlSet.Contains(uidl) && !localOnlyUidls.Contains(uidl)).ToList();
-        var orphanedKnown = cachedSummaryUidls.Where(uidl => !serverUidlSet.Contains(uidl) && !unrepairable.Contains(uidl) && !localOnlyUidls.Contains(uidl)).ToList();
-        foreach (var uidl in unrepairable)
-            await _syncStore.MoveToTrashAsync(accountKey, pop3Folder, uidl, cancellationToken).ConfigureAwait(false);
-        foreach (var uidl in orphanedKnown)
-            await _syncStore.MoveToTrashAsync(accountKey, pop3Folder, uidl, cancellationToken).ConfigureAwait(false);
+        var goneFromServer = FindStaleUidls(cachedSummaryUidls, serverUidls.ToHashSet(), localOnlyUidls);
+        if (goneFromServer.Count > 0)
+            await _syncStore.MarkLocalOnlyAsync(accountKey, pop3Folder, goneFromServer, cancellationToken).ConfigureAwait(false);
 
         await pop3.DisconnectAsync(true, cancellationToken).ConfigureAwait(false);
 
-        var pop3Changed = newSummaries.Count > 0 || unrepairable.Count > 0 || orphanedKnown.Count > 0;
+        var pop3Changed = newSummaries.Count > 0;
         if (pop3Changed)
             OnFoldersChanged();
 
@@ -1161,7 +1149,7 @@ public class MailKitEmailService : IEmailService
 
         var body = await _syncStore.GetBodyAsync(accountKey, folderFullName, uidl, cancellationToken)
             .ConfigureAwait(false)
-            ?? throw new InvalidOperationException("Message body not yet synced locally.");
+            ?? throw await BodyMissingAsync(accountKey, folderFullName, uid, cancellationToken).ConfigureAwait(false);
 
         // Persist the read state locally so it survives a reload of the mailbox list
         // (which rebuilds from the local cache), and for IMAP also mark the message Seen
@@ -1172,6 +1160,17 @@ public class MailKitEmailService : IEmailService
         var summary = await GetCachedSummaryForUidAsync(accountKey, folderFullName, uid, cancellationToken)
             .ConfigureAwait(false);
         return BuildMessageFromCache(uid, folderFullName, summary, body);
+    }
+
+    // Local-only mail can't be fetched again: its body is gone for good, which is not an error.
+    private async Task<Exception> BodyMissingAsync(
+        string accountKey, string folderFullName, uint uid, CancellationToken cancellationToken)
+    {
+        var summary = await GetCachedSummaryForUidAsync(accountKey, folderFullName, uid, cancellationToken)
+            .ConfigureAwait(false);
+        return summary is { IsLocalOnly: true }
+            ? new MessageNoLongerOnServerException()
+            : new InvalidOperationException("Message body not yet synced locally.");
     }
 
     /// <summary>
@@ -1279,7 +1278,7 @@ public class MailKitEmailService : IEmailService
 
         var body = await _syncStore.GetBodyAsync(accountKey, folderFullName, uidl, cancellationToken)
             .ConfigureAwait(false)
-            ?? throw new InvalidOperationException("Message body not yet synced locally.");
+            ?? throw await BodyMissingAsync(accountKey, folderFullName, uid, cancellationToken).ConfigureAwait(false);
 
         // Persist the read state locally so it survives a reload of the mailbox list
         // (which rebuilds from the local cache), and for IMAP also mark the message Seen
@@ -1436,7 +1435,7 @@ public class MailKitEmailService : IEmailService
 
         var body = await _syncStore.GetBodyAsync(accountKey, folderFullName, uidl, cancellationToken)
             .ConfigureAwait(false)
-            ?? throw new InvalidOperationException("Message body not yet synced locally.");
+            ?? throw await BodyMissingAsync(accountKey, folderFullName, uid, cancellationToken).ConfigureAwait(false);
 
         var attachment = body.Attachments.FirstOrDefault(a => a.PartSpecifier == partSpecifier);
         if (attachment is not null)

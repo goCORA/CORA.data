@@ -143,6 +143,30 @@ public class SyncStoresTests : IDisposable
     }
 
     [Fact]
+    public async Task MailGoneFromTheServer_StaysInItsFolder_AndKeepsItsBody()
+    {
+        var mail = (await OpenAsync()).MailSync;
+        await mail.UpsertAsync("a@x.com", "INBOX", [Mail("1", 1, "<one@x>"), Mail("2", 2, "<two@x>")]);
+        await mail.UpsertBodyAsync("a@x.com", "INBOX", "1", new StoredMailBody { TextBody = "hello" });
+
+        var gone = MailKitEmailService.FindStaleUidls(["1", "2"], new HashSet<string> { "2" }, new HashSet<string>());
+        Assert.Equal(new[] { "1" }, gone);
+        await mail.MarkLocalOnlyAsync("a@x.com", "INBOX", gone);
+        await mail.MarkLocalOnlyAsync("a@x.com", "INBOX", ["missing"]);
+
+        var rows = await mail.GetCachedSummariesAsync("a@x.com", "INBOX");
+        Assert.Equal(2, rows.Count);
+        Assert.True(rows.Single(r => r.Uidl == "1").IsLocalOnly);
+        Assert.False(rows.Single(r => r.Uidl == "2").IsLocalOnly);
+        Assert.Empty(await mail.GetCachedSummariesAsync("a@x.com", "Trash"));
+        Assert.Equal("hello", (await mail.GetBodyAsync("a@x.com", "INBOX", "1"))!.TextBody);
+
+        // The next sync leaves it alone.
+        var localOnly = rows.Where(r => r.IsLocalOnly).Select(r => r.Uidl).ToHashSet();
+        Assert.Empty(MailKitEmailService.FindStaleUidls(["1", "2"], new HashSet<string> { "2" }, localOnly));
+    }
+
+    [Fact]
     public async Task SyncState_SurvivesARestart()
     {
         var state = (await OpenAsync()).SyncState;

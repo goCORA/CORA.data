@@ -134,6 +134,11 @@ public interface IMailSyncStore
     Task<List<StoredMailSummary>> GetCachedSummariesAsync(
         string accountKey, string folderFullName, CancellationToken cancellationToken = default);
 
+    /// <summary>Marks cached messages as held only on this device, so server syncs leave them alone.</summary>
+    Task MarkLocalOnlyAsync(
+        string accountKey, string folderFullName, IEnumerable<string> uidls,
+        CancellationToken cancellationToken = default);
+
     /// <summary>Persists the local read state for a single cached message.</summary>
     Task SetReadStateAsync(
         string accountKey, string folderFullName, string uidl, bool isRead,
