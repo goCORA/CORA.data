@@ -234,6 +234,13 @@ public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
     void IFlushableStore.Flush() => _file.Flush();
     void IFlushableStore.SuppressFlush() => _file.SuppressFlush();
 
+    public Task<List<MailMessageIdentity>> GetMessageIdentitiesAsync(
+        string accountKey, CancellationToken cancellationToken = default) =>
+        Task.Run(() => _summaries.Find(s => s.AccountKey == accountKey)
+            .Where(s => !string.IsNullOrEmpty(s.MessageId))
+            .Select(s => new MailMessageIdentity { FolderName = s.FolderName, Uid = s.Uid, MessageId = s.MessageId })
+            .ToList(), cancellationToken);
+
     private static string MakeKey(string accountKey, string folderFullName, string uidl) =>
         string.Join("|", accountKey, folderFullName, uidl);
 

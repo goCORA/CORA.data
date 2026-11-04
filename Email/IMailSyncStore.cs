@@ -1,5 +1,13 @@
 namespace CORA.Data.Email;
 
+/// <summary>Where an email is on this device, and the <c>Message-Id</c> that names it on every device.</summary>
+public sealed class MailMessageIdentity
+{
+    public string FolderName { get; set; } = string.Empty;
+    public uint Uid { get; set; }
+    public string MessageId { get; set; } = string.Empty;
+}
+
 /// <summary>
 /// A single previously-synced POP3 message, keyed by its UIDL, cached locally so
 /// its headers do not need to be re-fetched from the server on every sync.
@@ -117,6 +125,10 @@ public interface IMailSyncStore
     /// </summary>
     Task RepairDuplicateUidsAsync(
         string accountKey, string folderFullName, CancellationToken cancellationToken = default);
+
+    /// <summary>Returns every cached email of an account that has a <c>Message-Id</c>, in all its folders.</summary>
+    Task<List<MailMessageIdentity>> GetMessageIdentitiesAsync(
+        string accountKey, CancellationToken cancellationToken = default);
 
     /// <summary>Returns all cached summaries for the given account/folder, newest first.</summary>
     Task<List<StoredMailSummary>> GetCachedSummariesAsync(

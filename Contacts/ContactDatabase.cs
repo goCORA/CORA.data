@@ -29,6 +29,22 @@ public class ContactDatabase : IContactStore, IFlushableStore, IDisposable
         _contacts.EnsureIndex(c => c.FirstName);
         _contacts.EnsureIndex(c => c.LastName);
         _contacts.EnsureIndex(c => c.Email);
+        _contacts.EnsureIndex(c => c.SyncId);
+        AssignMissingSyncIds();
+    }
+
+    private static string NewSyncId() => Guid.NewGuid().ToString("N");
+
+    // Contacts saved before sync existed. Older versions simply ignore the extra field.
+    private void AssignMissingSyncIds()
+    {
+        var missing = _contacts.FindAll().Where(c => string.IsNullOrEmpty(c.SyncId)).ToList();
+        if (missing.Count == 0)
+            return;
+        foreach (var contact in missing)
+            contact.SyncId = NewSyncId();
+        _contacts.Update(missing);
+        Volatile.Write(ref _dirty, 1);
     }
 
     public void Dispose() => _file.Dispose();
@@ -75,6 +91,13 @@ public class ContactDatabase : IContactStore, IFlushableStore, IDisposable
     public Task<int> SaveAsync(Contact contact) =>
         Task.Run(() =>
         {
+            // An edit may arrive on a new object: the contact keeps the identity it already has.
+            if (string.IsNullOrEmpty(contact.SyncId))
+            {
+                var existing = contact.Id == 0 ? null : _contacts.FindById(contact.Id)?.SyncId;
+                contact.SyncId = string.IsNullOrEmpty(existing) ? NewSyncId() : existing;
+            }
+
             if (contact.Id == 0)
             {
                 var newId = _contacts.Insert(contact);

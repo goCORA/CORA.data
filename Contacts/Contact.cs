@@ -8,6 +8,13 @@ public class Contact : INotifyPropertyChanged
 {
     [BsonId]
     public int Id { get; set; }
+
+    /// <summary>
+    /// The contact's identity across devices (claude/design-cloud-backup-sync.md). <see cref="Id"/>
+    /// is a number local to this device. Set by <see cref="ContactDatabase"/>.
+    /// </summary>
+    public string SyncId { get; set; } = string.Empty;
+
     public string FirstName { get; set; } = string.Empty;
     public string LastName { get; set; } = string.Empty;
     public string Email { get; set; } = string.Empty;

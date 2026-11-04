@@ -19,6 +19,12 @@ internal static class StoreFiles
     public const string FolderOrder = "folder_order.litedb";
     public const string SecureMessageKeys = "secure_message_keys.litedb";
 
+    /// <summary>
+    /// Sync bookkeeping. Belongs to this device, so it is deliberately not in <see cref="Databases"/>:
+    /// no backup carries it. <see cref="IDataStores.WipeAllAsync"/> deletes it too.
+    /// </summary>
+    public const string SyncState = "sync_state.litedb";
+
     /// <summary>Subdirectory of the app data directory holding synced (POP3) attachments.</summary>
     public const string AttachmentsDirectory = "mail_attachments";
 

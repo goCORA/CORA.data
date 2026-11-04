@@ -126,7 +126,31 @@ public class TagDatabase : ITagStore, IFlushableStore, IDisposable
                 FolderName = folderFullName,
                 Uid = uid,
                 TagId = tagId,
+                MessageId = _messageTags.FindById(id)?.MessageId ?? string.Empty,
             });
+        }, cancellationToken);
+
+    public Task<List<MessageTagAssignment>> GetAssignmentsAsync(CancellationToken cancellationToken = default) =>
+        Task.Run(() => _messageTags.FindAll()
+            .Select(m => new MessageTagAssignment
+            {
+                AccountKey = m.AccountKey,
+                FolderName = m.FolderName,
+                Uid = m.Uid,
+                TagId = m.TagId,
+                MessageId = m.MessageId ?? string.Empty, // LiteDB stores empty strings as null
+            })
+            .ToList(), cancellationToken);
+
+    public Task SetAssignmentMessageIdAsync(
+        string accountKey, string folderFullName, uint uid, string messageId, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            var doc = _messageTags.FindById(MakeMessageKey(accountKey, folderFullName, uid));
+            if (doc is null)
+                return;
+            doc.MessageId = messageId;
+            _messageTags.Update(doc);
         }, cancellationToken);
 
     public Task DeleteAccountAssignmentsAsync(string emailAddress, CancellationToken cancellationToken = default) =>
@@ -157,5 +181,8 @@ public class TagDatabase : ITagStore, IFlushableStore, IDisposable
         public string FolderName { get; set; } = string.Empty;
         public uint Uid { get; set; }
         public string TagId { get; set; } = string.Empty;
+
+        // Absent from documents written before sync; LiteDB leaves these as empty strings.
+        public string MessageId { get; set; } = string.Empty;
     }
 }
