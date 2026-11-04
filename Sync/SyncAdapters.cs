@@ -22,14 +22,17 @@ public sealed class ContactsSyncAdapter(IContactStore contacts) : ISyncAdapter
     {
         var all = await contacts.GetAllAsync().ConfigureAwait(false);
         var taken = all.Select(c => c.SyncId).ToHashSet();
-        var unmatched = all.Where(c => !cloudItems.ContainsKey(c.SyncId) && c.Emails.Count > 0).ToList();
+        var unmatched = all.Where(c => !cloudItems.ContainsKey(c.SyncId)).ToList();
         foreach (var (id, text) in cloudItems)
         {
             if (taken.Contains(id) || JsonSerializer.Deserialize<Data>(text) is not { } data)
                 continue;
             var emails = data.Email.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var same = unmatched.FirstOrDefault(c => c.Emails.Any(emails.Contains));
+            // Same email; or, with no email on either, the same name and the same phone number.
+            var same = unmatched.FirstOrDefault(c => emails.Count > 0
+                ? c.Emails.Any(emails.Contains)
+                : c.Emails.Count == 0 && SameNameAndPhone(c, data));
             if (same is null)
                 continue;
             unmatched.Remove(same);
@@ -37,6 +40,14 @@ public sealed class ContactsSyncAdapter(IContactStore contacts) : ISyncAdapter
             await contacts.SaveAsync(same).ConfigureAwait(false);
         }
     }
+
+    private static string Digits(string? phone) => new((phone ?? string.Empty).Where(char.IsDigit).ToArray());
+
+    private static bool SameNameAndPhone(Contact c, Data data) =>
+        (data.First.Length > 0 || data.Last.Length > 0)
+        && string.Equals((c.FirstName ?? string.Empty).Trim(), data.First.Trim(), StringComparison.OrdinalIgnoreCase)
+        && string.Equals((c.LastName ?? string.Empty).Trim(), data.Last.Trim(), StringComparison.OrdinalIgnoreCase)
+        && Digits(c.Phone) == Digits(data.Phone);
 
     public async Task ApplyAsync(IReadOnlyDictionary<string, string> upserts, IReadOnlyCollection<string> deletes, CancellationToken cancellationToken)
     {

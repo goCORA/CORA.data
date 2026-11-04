@@ -28,6 +28,9 @@ public class TrustedImageSenderDatabase : ITrustedImageSenderStore, IFlushableSt
     private readonly ILiteCollection<TrustedSenderDoc> _senders;
     private readonly ILiteCollection<MessageImagesAllowedDoc> _messages;
 
+    /// <summary>Raised after a change that sync carries to other devices.</summary>
+    internal Action? Changed { get; set; }
+
     public TrustedImageSenderDatabase(string path)
     {
         _file = EncryptedLiteDbFile.Open(path);
@@ -70,6 +73,7 @@ public class TrustedImageSenderDatabase : ITrustedImageSenderStore, IFlushableSt
                 SenderEmail = NormalizeSender(senderEmail),
                 Trusted = trusted,
             });
+            Changed?.Invoke();
         }, cancellationToken);
 
     public Task<bool> IsMessageAllowedAsync(

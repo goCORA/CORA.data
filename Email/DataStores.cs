@@ -24,6 +24,9 @@ public interface IDataStores : IDisposable
     ISecureMessageKeyStore SecureMessageKeys { get; }
     ISyncStateStore SyncState { get; }
 
+    /// <summary>Raised after a change that sync carries to other devices. May come from any thread.</summary>
+    event Action? SyncableDataChanged;
+
     /// <summary>
     /// Immediately flushes every store to disk without closing anything. Safe to call
     /// any number of times, including while the app keeps running afterward - unlike
@@ -142,6 +145,7 @@ public sealed class SecureDataStores : IDataStores, IDisposable
     public IAiResultCacheStore AiResultCache => _aiResultCache;
     public ISecureMessageKeyStore SecureMessageKeys => _secureMessageKeys;
     public ISyncStateStore SyncState => _syncState;
+    public event Action? SyncableDataChanged;
 
     private SecureDataStores(
         string baseDir,
@@ -172,7 +176,12 @@ public sealed class SecureDataStores : IDataStores, IDisposable
         _autoFlushTask = RunAutoFlushLoopAsync(_autoFlushCts.Token);
 
         _contactsFlushTimer = new Timer(_ => FlushContacts(), null, Timeout.Infinite, Timeout.Infinite);
-        _contacts.Changed = ScheduleContactsFlush;
+        _contacts.Changed = () =>
+        {
+            ScheduleContactsFlush();
+            SyncableDataChanged?.Invoke();
+        };
+        _tags.Changed = _blacklist.Changed = _trustedImageSenders.Changed = () => SyncableDataChanged?.Invoke();
     }
 
     private void ScheduleContactsFlush()

@@ -15,6 +15,9 @@ public class TagDatabase : ITagStore, IFlushableStore, IDisposable
     private readonly ILiteCollection<TagDoc> _tags;
     private readonly ILiteCollection<MessageTagDoc> _messageTags;
 
+    /// <summary>Raised after a change that sync carries to other devices.</summary>
+    internal Action? Changed { get; set; }
+
     public TagDatabase(string path)
     {
         _file = EncryptedLiteDbFile.Open(path);
@@ -60,6 +63,7 @@ public class TagDatabase : ITagStore, IFlushableStore, IDisposable
                 ColorHex = colorHex,
             };
             _tags.Insert(doc);
+            Changed?.Invoke();
             return new TagDefinition { Id = doc.Id, Name = doc.Name, ColorHex = doc.ColorHex };
         }, cancellationToken);
 
@@ -73,6 +77,7 @@ public class TagDatabase : ITagStore, IFlushableStore, IDisposable
                 Name = name,
                 ColorHex = colorHex,
             });
+            Changed?.Invoke();
         }, cancellationToken);
 
     public Task DeleteTagAsync(string tagId, CancellationToken cancellationToken = default) =>
@@ -80,6 +85,7 @@ public class TagDatabase : ITagStore, IFlushableStore, IDisposable
         {
             _tags.Delete(tagId);
             _messageTags.DeleteMany(m => m.TagId == tagId);
+            Changed?.Invoke();
         }, cancellationToken);
 
     public Task<TagDefinition?> GetMessageTagAsync(
@@ -116,6 +122,7 @@ public class TagDatabase : ITagStore, IFlushableStore, IDisposable
             if (string.IsNullOrEmpty(tagId))
             {
                 _messageTags.Delete(id);
+                Changed?.Invoke();
                 return;
             }
 
@@ -128,6 +135,7 @@ public class TagDatabase : ITagStore, IFlushableStore, IDisposable
                 TagId = tagId,
                 MessageId = _messageTags.FindById(id)?.MessageId ?? string.Empty,
             });
+            Changed?.Invoke();
         }, cancellationToken);
 
     public Task<List<MessageTagAssignment>> GetAssignmentsAsync(CancellationToken cancellationToken = default) =>

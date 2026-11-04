@@ -27,6 +27,9 @@ public class BlacklistDatabase : IBlacklistStore, IFlushableStore, IDisposable
     private readonly ILiteCollection<BlacklistedSenderDoc> _senders;
     private readonly ILiteCollection<BlacklistedDomainDoc> _domains;
 
+    /// <summary>Raised after a change that sync carries to other devices.</summary>
+    internal Action? Changed { get; set; }
+
     public BlacklistDatabase(string path)
     {
         _file = EncryptedLiteDbFile.Open(path);
@@ -68,12 +71,14 @@ public class BlacklistDatabase : IBlacklistStore, IFlushableStore, IDisposable
         Task.Run(() =>
         {
             _senders.Upsert(new BlacklistedSenderDoc { SenderEmail = NormalizeSender(senderEmail) });
+            Changed?.Invoke();
         }, cancellationToken);
 
     public Task BlacklistDomainAsync(string domain, CancellationToken cancellationToken = default) =>
         Task.Run(() =>
         {
             _domains.Upsert(new BlacklistedDomainDoc { Domain = NormalizeDomain(domain) });
+            Changed?.Invoke();
         }, cancellationToken);
 
     public Task<IReadOnlyList<string>> GetBlacklistedSendersAsync(CancellationToken cancellationToken = default) =>
@@ -83,8 +88,16 @@ public class BlacklistDatabase : IBlacklistStore, IFlushableStore, IDisposable
         Task.Run(IReadOnlyList<string> () => _domains.FindAll().Select(d => d.Domain).ToList(), cancellationToken);
 
     public Task RemoveSenderAsync(string senderEmail, CancellationToken cancellationToken = default) =>
-        Task.Run(() => _senders.Delete(NormalizeSender(senderEmail)), cancellationToken);
+        Task.Run(() =>
+        {
+            _senders.Delete(NormalizeSender(senderEmail));
+            Changed?.Invoke();
+        }, cancellationToken);
 
     public Task RemoveDomainAsync(string domain, CancellationToken cancellationToken = default) =>
-        Task.Run(() => _domains.Delete(NormalizeDomain(domain)), cancellationToken);
+        Task.Run(() =>
+        {
+            _domains.Delete(NormalizeDomain(domain));
+            Changed?.Invoke();
+        }, cancellationToken);
 }

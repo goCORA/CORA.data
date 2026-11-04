@@ -1,6 +1,7 @@
 using CORA.Core.Security;
 using CORA.Data.Contacts;
 using CORA.Data.Email;
+using CORA.Data.Sync;
 using CORA.Data.Tests.App;
 using LiteDB;
 
@@ -164,6 +165,54 @@ public class SyncStoresTests : IDisposable
         // The next sync leaves it alone.
         var localOnly = rows.Where(r => r.IsLocalOnly).Select(r => r.Uidl).ToHashSet();
         Assert.Empty(MailKitEmailService.FindStaleUidls(["1", "2"], new HashSet<string> { "2" }, localOnly));
+    }
+
+    [Fact]
+    public async Task FirstSync_MatchesContacts_ByEmail_OrByNameAndPhone_WhenNeitherHasAnEmail()
+    {
+        var store = (await OpenAsync()).Contacts;
+        var adapter = new ContactsSyncAdapter(store);
+        var byEmail = new Contact { FirstName = "Anna", Email = "Anna@Example.com" };
+        var byPhone = new Contact { FirstName = "Ben", LastName = "Roy", Phone = "(613) 555-0100" };
+        var otherPhone = new Contact { FirstName = "Ben", LastName = "Roy", Phone = "613-555-0199" };
+        var noName = new Contact { Phone = "613-555-0100" };
+        foreach (var c in new[] { byEmail, byPhone, otherPhone, noName })
+            await store.SaveAsync(c);
+
+        await adapter.AlignAsync(new Dictionary<string, string>
+        {
+            ["cloud-email"] = """{"First":"Ann","Last":"","Email":"anna@example.com","Phone":"","Photo":"","IsGoCORA":false,"Tags":""}""",
+            ["cloud-phone"] = """{"First":"ben","Last":"ROY","Email":"","Phone":"613 555 0100","Photo":"","IsGoCORA":false,"Tags":""}""",
+            ["cloud-noname"] = """{"First":"","Last":"","Email":"","Phone":"6135550100","Photo":"","IsGoCORA":false,"Tags":""}""",
+        }, CancellationToken.None);
+
+        Assert.Equal("cloud-email", (await store.GetAsync(byEmail.Id))!.SyncId);
+        Assert.Equal("cloud-phone", (await store.GetAsync(byPhone.Id))!.SyncId);
+        Assert.Equal(otherPhone.SyncId, (await store.GetAsync(otherPhone.Id))!.SyncId);
+        Assert.Equal(noName.SyncId, (await store.GetAsync(noName.Id))!.SyncId);
+    }
+
+    [Fact]
+    public async Task ChangesThatSyncCarries_RaiseAnEvent_ButFillingInMessageIdsDoesNot()
+    {
+        var stores = await OpenAsync();
+        var raised = 0;
+        stores.SyncableDataChanged += () => Interlocked.Increment(ref raised);
+
+        await stores.Contacts.SaveAsync(new Contact { FirstName = "Anna" });
+        Assert.Equal(1, raised);
+        var tag = await stores.Tags.AddTagAsync("Work", "#000000");
+        Assert.Equal(2, raised);
+        await stores.Tags.SetMessageTagAsync("a@x.com", "INBOX", 1, tag.Id);
+        Assert.Equal(3, raised);
+        await stores.Blacklist.BlacklistSenderAsync("spam@x.com");
+        await stores.Blacklist.RemoveSenderAsync("spam@x.com");
+        Assert.Equal(5, raised);
+        await stores.TrustedImageSenders.SetTrustedAsync("a@x.com", true);
+        Assert.Equal(6, raised);
+
+        await stores.Tags.SetAssignmentMessageIdAsync("a@x.com", "INBOX", 1, "<m@x>");
+        Assert.Equal(6, raised);
     }
 
     [Fact]
