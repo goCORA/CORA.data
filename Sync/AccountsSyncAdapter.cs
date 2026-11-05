@@ -16,7 +16,8 @@ public sealed class AccountsSyncAdapter(
     IFolderOrderStore order,
     ISyncStateStore state,
     Func<bool> askBeforeAdding,
-    Func<MailAccount, Task> accountAdded) : ISyncAdapter
+    Func<MailAccount, Task> accountAdded,
+    Func<MailAccount, Task> accountChanged) : ISyncAdapter
 {
     private const string Account = "acct:";
     private const string Password = "pwd:";
@@ -134,6 +135,37 @@ public sealed class AccountsSyncAdapter(
         return ids;
     }
 
+    public async Task<IReadOnlySet<string>> GetNotAppliedAsync(CancellationToken cancellationToken)
+    {
+        var ids = new HashSet<string>();
+        foreach (var h in (await HeldAsync(cancellationToken).ConfigureAwait(false)).Values)
+        {
+            ids.Add(Account + h.Email);
+            if (h.State is not (SyncHeldState.WaitingChange or SyncHeldState.RejectedChange))
+                ids.UnionWith([Password + h.Email, Hidden + h.Email, Order + h.Email]);
+        }
+        if (!await PasswordsOnAsync(cancellationToken).ConfigureAwait(false))
+        {
+            // The setting turned off: passwords leave the cloud, and this device keeps its own.
+            foreach (var a in await accounts.LoadAllAsync().ConfigureAwait(false))
+                ids.Add(Password + Normalize(a.EmailAddress));
+        }
+        return ids;
+    }
+
+    public (string Item, string Detail) Describe(string itemId)
+    {
+        if (itemId.StartsWith(Account, StringComparison.Ordinal))
+            return (SyncHistoryItem.Account, itemId[Account.Length..]);
+        if (itemId.StartsWith(Password, StringComparison.Ordinal))
+            return (SyncHistoryItem.Password, itemId[Password.Length..]);
+        if (itemId.StartsWith(Hidden, StringComparison.Ordinal))
+            return (SyncHistoryItem.Folders, itemId[Hidden.Length..]);
+        if (itemId.StartsWith(Order, StringComparison.Ordinal))
+            return (SyncHistoryItem.Folders, itemId[Order.Length..]);
+        return (SyncHistoryItem.PasswordsSetting, string.Empty);
+    }
+
     public Task AlignAsync(IReadOnlyDictionary<string, string> cloudItems, CancellationToken cancellationToken) => Task.CompletedTask;
 
     public async Task ApplyAsync(IReadOnlyDictionary<string, string> upserts, IReadOnlyCollection<string> deletes, CancellationToken cancellationToken)
@@ -173,6 +205,7 @@ public sealed class AccountsSyncAdapter(
             {
                 ApplySettings(account, cloud);
                 await accounts.SaveAccountAsync(account).ConfigureAwait(false);
+                await accountChanged(account).ConfigureAwait(false);
                 if (h is not null)
                     await state.RemoveHeldAccountAsync(email, cancellationToken).ConfigureAwait(false);
             }
@@ -184,6 +217,7 @@ public sealed class AccountsSyncAdapter(
             {
                 account.Password = value;
                 await accounts.SaveAccountAsync(account).ConfigureAwait(false);
+                await accountChanged(account).ConfigureAwait(false);
             }
             else if (id.StartsWith(Hidden, StringComparison.Ordinal) && local.ContainsKey(id[Hidden.Length..]))
             {
@@ -233,6 +267,9 @@ public sealed class AccountsSyncAdapter(
     public static string? OAuthProviderOf(SyncHeldAccount held) =>
         held.Data is { } text && Parse(text) is { Auth: nameof(AuthMethod.OAuth) } data ? data.Provider : null;
 
+    /// <summary>The name the account has on the other devices.</summary>
+    public static string DisplayNameOf(SyncHeldAccount held) => held.Data is { } text ? Parse(text).Name : string.Empty;
+
     /// <summary>The incoming server of a held account, for the Accept or Reject question.</summary>
     public static string ServerOf(SyncHeldAccount held) => held.Data is { } text ? Parse(text).ImapHost : string.Empty;
 
@@ -272,6 +309,7 @@ public sealed class AccountsSyncAdapter(
             return;
         ApplySettings(account, Parse(h.Data));
         await accounts.SaveAccountAsync(account).ConfigureAwait(false);
+        await accountChanged(account).ConfigureAwait(false);
         await state.RemoveHeldAccountAsync(h.Email, cancellationToken).ConfigureAwait(false);
     }
 

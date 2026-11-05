@@ -26,6 +26,9 @@ public interface IEmailService
     /// <summary>Raised whenever folder metadata (counts/unread) may have changed.</summary>
     event EventHandler? FoldersChanged;
 
+    /// <summary>An account was added to or removed from <see cref="Accounts"/>. May be raised on any thread.</summary>
+    event EventHandler? AccountsChanged;
+
     /// <summary>The account currently active, or null.</summary>
     MailAccount? CurrentAccount { get; }
 

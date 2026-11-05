@@ -79,6 +79,43 @@ public sealed class SyncPendingTag
 }
 
 /// <summary>
+/// One line of Cloud sync › History: what came to this device or left it. Which item and how many,
+/// never its content, so a password's value is never here.
+/// </summary>
+public sealed class SyncHistoryEntry
+{
+    public DateTime AtUtc { get; set; }
+
+    /// <summary>True when it came from another device, false when this device sent it.</summary>
+    public bool Incoming { get; set; }
+
+    /// <summary>A kind ("contacts", "tags", "lists") or one of <see cref="SyncHistoryItem"/>.</summary>
+    public string Item { get; set; } = string.Empty;
+
+    /// <summary>The email address, for what belongs to one account; a date for an undo.</summary>
+    public string Detail { get; set; } = string.Empty;
+
+    public bool Removed { get; set; }
+    public int Count { get; set; }
+}
+
+/// <summary>History items that aren't a whole kind.</summary>
+public static class SyncHistoryItem
+{
+    public const string Account = "account";
+    public const string Password = "password";
+    public const string Folders = "folders";
+    public const string PasswordsSetting = "setting";
+    public const string AccountAdded = "account-added";
+    public const string ChangeAccepted = "change-accepted";
+    public const string ChangeRejected = "change-rejected";
+    public const string RemovalAccepted = "removal-accepted";
+    public const string RemovalRejected = "removal-rejected";
+    public const string Undo = "undo";
+    public const string CloudDeleted = "cloud-deleted";
+}
+
+/// <summary>
 /// This device's own sync bookkeeping. It belongs to the device: it is never synced and is in no
 /// backup (a restored copy would wrongly say what this device has), and Erase deletes it.
 /// </summary>
@@ -115,7 +152,16 @@ public interface ISyncStateStore
     Task SetPendingTagAsync(SyncPendingTag tag, CancellationToken cancellationToken = default);
     Task RemovePendingTagAsync(string accountKey, string messageId, CancellationToken cancellationToken = default);
 
-    /// <summary>Forgets everything (sync turned off and on, another goCORA account).</summary>
+    /// <summary>Adds lines to this device's sync history.</summary>
+    Task AddHistoryAsync(IEnumerable<SyncHistoryEntry> entries, CancellationToken cancellationToken = default);
+
+    /// <summary>This device's sync history, newest first.</summary>
+    Task<List<SyncHistoryEntry>> GetHistoryAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>Removes history older than <paramref name="beforeUtc"/>, or all of it when null.</summary>
+    Task RemoveHistoryAsync(DateTime? beforeUtc, CancellationToken cancellationToken = default);
+
+    /// <summary>Forgets everything, the history too (another goCORA account starting here).</summary>
     Task ResetAsync(CancellationToken cancellationToken = default);
 }
 
@@ -130,6 +176,7 @@ public class SyncStateDatabase : ISyncStateStore, IFlushableStore, IDisposable
     private readonly ILiteCollection<ItemDoc> _items;
     private readonly ILiteCollection<HeldDoc> _held;
     private readonly ILiteCollection<PendingTagDoc> _pendingTags;
+    private readonly ILiteCollection<HistoryDoc> _history;
 
     public SyncStateDatabase(string path)
     {
@@ -140,6 +187,7 @@ public class SyncStateDatabase : ISyncStateStore, IFlushableStore, IDisposable
         _items.EnsureIndex(i => i.Kind);
         _held = _file.Database.GetCollection<HeldDoc>("HeldAccounts");
         _pendingTags = _file.Database.GetCollection<PendingTagDoc>("PendingTags");
+        _history = _file.Database.GetCollection<HistoryDoc>("History");
     }
 
     public void Dispose() => _file.Dispose();
@@ -252,6 +300,46 @@ public class SyncStateDatabase : ISyncStateStore, IFlushableStore, IDisposable
     public Task RemovePendingTagAsync(string accountKey, string messageId, CancellationToken cancellationToken = default) =>
         Task.Run(() => _pendingTags.Delete(PendingKey(accountKey, messageId)), cancellationToken);
 
+    public Task AddHistoryAsync(IEnumerable<SyncHistoryEntry> entries, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            foreach (var e in entries)
+            {
+                _history.Insert(new HistoryDoc
+                {
+                    AtUtc = e.AtUtc,
+                    Incoming = e.Incoming,
+                    Item = e.Item,
+                    Detail = e.Detail,
+                    Removed = e.Removed,
+                    Count = e.Count,
+                });
+            }
+        }, cancellationToken);
+
+    public Task<List<SyncHistoryEntry>> GetHistoryAsync(CancellationToken cancellationToken = default) =>
+        Task.Run(() => _history.FindAll()
+            .OrderByDescending(h => h.AtUtc).ThenByDescending(h => h.Id)
+            .Select(h => new SyncHistoryEntry
+            {
+                AtUtc = h.AtUtc.ToUniversalTime(), // LiteDB reads dates back as local time
+                Incoming = h.Incoming,
+                Item = h.Item ?? string.Empty,     // LiteDB stores empty strings as null
+                Detail = h.Detail ?? string.Empty,
+                Removed = h.Removed,
+                Count = h.Count,
+            })
+            .ToList(), cancellationToken);
+
+    public Task RemoveHistoryAsync(DateTime? beforeUtc, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            if (beforeUtc is { } before)
+                _history.DeleteMany(h => h.AtUtc < before);
+            else
+                _history.DeleteAll();
+        }, cancellationToken);
+
     public Task ResetAsync(CancellationToken cancellationToken = default) =>
         Task.Run(() =>
         {
@@ -260,6 +348,7 @@ public class SyncStateDatabase : ISyncStateStore, IFlushableStore, IDisposable
             _items.DeleteAll();
             _held.DeleteAll();
             _pendingTags.DeleteAll();
+            _history.DeleteAll();
         }, cancellationToken);
 
     private sealed class MetaDoc
@@ -297,6 +386,17 @@ public class SyncStateDatabase : ISyncStateStore, IFlushableStore, IDisposable
         public string Email { get; set; } = string.Empty;
         public SyncHeldState State { get; set; }
         public string? Data { get; set; }
+    }
+
+    private sealed class HistoryDoc
+    {
+        public int Id { get; set; }
+        public DateTime AtUtc { get; set; }
+        public bool Incoming { get; set; }
+        public string Item { get; set; } = string.Empty;
+        public string Detail { get; set; } = string.Empty;
+        public bool Removed { get; set; }
+        public int Count { get; set; }
     }
 
     private sealed class PendingTagDoc

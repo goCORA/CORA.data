@@ -68,6 +68,16 @@ public interface ISyncAdapter
     /// </summary>
     Task<IReadOnlySet<string>> GetElsewhereAsync(CancellationToken cancellationToken) =>
         Task.FromResult<IReadOnlySet<string>>(new HashSet<string>());
+
+    /// <summary>
+    /// Items <see cref="ApplyAsync"/> was given but held back, waiting for an answer or left alone.
+    /// They didn't sync here, so History doesn't list them.
+    /// </summary>
+    Task<IReadOnlySet<string>> GetNotAppliedAsync(CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlySet<string>>(new HashSet<string>());
+
+    /// <summary>How History names an item. Kept together, a kind's items make one counted line.</summary>
+    (string Item, string Detail) Describe(string itemId) => (Kind, string.Empty);
 }
 
 public enum SyncKindOutcome

@@ -17,6 +17,7 @@ public sealed class SyncEngine
     public static readonly TimeSpan DeletionMarkerAge = TimeSpan.FromDays(365);
 
     private const int MassDeleteMinimum = 20;
+    private const string SendingKeyPrefix = "history-sending:";
 
     private readonly ISyncStateStore _state;
     private readonly ISyncCloud _cloud;
@@ -113,6 +114,24 @@ public sealed class SyncEngine
             CryptographicOperations.ZeroMemory(plain);
         }
     }
+
+    private List<SyncHistoryEntry> HistoryLines(ISyncAdapter adapter, bool incoming, IEnumerable<(string Id, bool Removed)> items)
+    {
+        var at = _utcNow();
+        return items
+            .GroupBy(i => (Label: adapter.Describe(i.Id), i.Removed))
+            .Select(g => new SyncHistoryEntry { AtUtc = at, Incoming = incoming, Item = g.Key.Label.Item, Detail = g.Key.Label.Detail, Removed = g.Key.Removed, Count = g.Count() })
+            .ToList();
+    }
+
+    private async Task<Dictionary<string, bool>> GetSendingAsync(string kind, CancellationToken cancellationToken)
+    {
+        var text = await _state.GetValueAsync(SendingKeyPrefix + kind, cancellationToken).ConfigureAwait(false);
+        return string.IsNullOrEmpty(text) ? [] : JsonSerializer.Deserialize<Dictionary<string, bool>>(text) ?? [];
+    }
+
+    private Task SetSendingAsync(string kind, Dictionary<string, bool> sending, CancellationToken cancellationToken) =>
+        _state.SetValueAsync(SendingKeyPrefix + kind, JsonSerializer.Serialize(sending), cancellationToken);
 
     private static string Hash(string data) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(data)));
 
@@ -224,7 +243,13 @@ public sealed class SyncEngine
             return new SyncKindResult(kind, SyncKindOutcome.NeedsConfirmation, deletes.Count);
 
         if (upserts.Count > 0 || deletes.Count > 0)
+        {
             await adapter.ApplyAsync(upserts, deletes, cancellationToken).ConfigureAwait(false);
+            var notApplied = await adapter.GetNotAppliedAsync(cancellationToken).ConfigureAwait(false);
+            await _state.AddHistoryAsync(HistoryLines(adapter, true,
+                upserts.Keys.Select(id => (id, false)).Concat(deletes.Select(id => (id, true))).Where(i => !notApplied.Contains(i.Item1))),
+                cancellationToken).ConfigureAwait(false);
+        }
 
         // Hash what is really here now: that is what the next run compares with.
         var applied = upserts.Count > 0 || deletes.Count > 0 ? await adapter.ReadAsync(cancellationToken).ConfigureAwait(false) : local;
@@ -261,6 +286,15 @@ public sealed class SyncEngine
             // Recorded first: this run's edits now look unchanged, so a failed upload must not
             // leave them stranded on this device.
             await _state.SetKindAsync(new SyncKindState { Kind = kind, HighestVersionSeen = seen, AppliedVersion = read, NeedsUpload = true }, cancellationToken).ConfigureAwait(false);
+
+            // History lists these once they've left. Kept until then, because the next run no
+            // longer sees them as edits.
+            var sending = await GetSendingAsync(kind, cancellationToken).ConfigureAwait(false);
+            foreach (var m in mine.Values.Where(m => ReferenceEquals(merged[m.Id], m) && (!known.TryGetValue(m.Id, out var k) || k.Revision != m.Rev || k.Deleted != m.Del)))
+                sending[m.Id] = m.Del;
+            if (sending.Count > 0)
+                await SetSendingAsync(kind, sending, cancellationToken).ConfigureAwait(false);
+
             var next = cloudVersion + 1;
             var snapshot = JsonSerializer.SerializeToUtf8Bytes(new Snapshot { Items = merged.Values.OrderBy(i => i.Id, StringComparer.Ordinal).ToList() });
             try
@@ -269,6 +303,11 @@ public sealed class SyncEngine
                 await _cloud.UploadAsync(kind, next, _sealer.Generation, blob, cancellationToken).ConfigureAwait(false);
                 seen = next;
                 read = next;
+                if (sending.Count > 0)
+                {
+                    await _state.AddHistoryAsync(HistoryLines(adapter, false, sending.Select(s => (s.Key, s.Value))), cancellationToken).ConfigureAwait(false);
+                    await SetSendingAsync(kind, [], cancellationToken).ConfigureAwait(false);
+                }
             }
             catch (SyncVersionOutdatedException)
             {

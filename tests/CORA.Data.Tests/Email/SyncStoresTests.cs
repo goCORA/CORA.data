@@ -35,6 +35,30 @@ public class SyncStoresTests : IDisposable
         public Task RemoveAsync(string key) { _values.Remove(key); return Task.CompletedTask; }
     }
 
+    [Fact]
+    public async Task History_IsNewestFirst_SurvivesAReopen_AndRemovesByAge()
+    {
+        var stores = await OpenAsync();
+        var now = DateTime.UtcNow;
+        await stores.SyncState.AddHistoryAsync(
+        [
+            new SyncHistoryEntry { AtUtc = now.AddDays(-100), Incoming = true, Item = "contacts", Count = 3 },
+            new SyncHistoryEntry { AtUtc = now, Item = "password", Detail = "a@b.c", Count = 1 },
+        ]);
+        stores.Flush();
+
+        stores = await OpenAsync();
+        var history = await stores.SyncState.GetHistoryAsync();
+        Assert.Equal(new[] { "password", "contacts" }, history.Select(h => h.Item));
+        Assert.Equal(string.Empty, history[1].Detail);
+        Assert.Equal(DateTimeKind.Utc, history[0].AtUtc.Kind);
+
+        await stores.SyncState.RemoveHistoryAsync(now.AddDays(-90));
+        Assert.Equal("password", Assert.Single(await stores.SyncState.GetHistoryAsync()).Item);
+        await stores.SyncState.RemoveHistoryAsync(null);
+        Assert.Empty(await stores.SyncState.GetHistoryAsync());
+    }
+
     private async Task<IDataStores> OpenAsync()
     {
         _stores?.Dispose();

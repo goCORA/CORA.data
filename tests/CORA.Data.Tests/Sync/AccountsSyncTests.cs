@@ -12,6 +12,7 @@ public class AccountsSyncTests : IDisposable
     private IDataStores? _stores;
     private bool _ask = true;
     private readonly List<string> _added = [];
+    private readonly List<(string Email, string Password)> _changed = [];
 
     public void Dispose()
     {
@@ -37,7 +38,8 @@ public class AccountsSyncTests : IDisposable
         Directory.CreateDirectory(_dir);
         _stores = await SecureDataStores.CreateAsync(new TempAppData(_dir), new KeyStorage(), new InMemoryPreferenceStore());
         return new AccountsSyncAdapter(_stores.Accounts, _stores.HiddenFolders, _stores.FolderOrder, _stores.SyncState, () => _ask,
-            a => { _added.Add(a.EmailAddress); return Task.CompletedTask; });
+            a => { _added.Add(a.EmailAddress); return Task.CompletedTask; },
+            a => { _changed.Add((a.EmailAddress, a.Password)); return Task.CompletedTask; });
     }
 
     private static MailAccount Work(string host = "mail.example.com", string name = "Work") => new()
@@ -52,6 +54,28 @@ public class AccountsSyncTests : IDisposable
     private static readonly string[] NoDeletes = [];
 
     private static Dictionary<string, string> One(string id, string text) => new() { [id] = text };
+
+    [Fact]
+    public async Task History_NamesEachItem_AndLeavesOutWhatIsHeld()
+    {
+        var adapter = await OpenAsync();
+        Assert.Equal((SyncHistoryItem.Password, "work@example.com"), adapter.Describe(Pwd));
+        Assert.Equal((SyncHistoryItem.Account, "work@example.com"), adapter.Describe(Id));
+        Assert.Equal((SyncHistoryItem.PasswordsSetting, string.Empty), adapter.Describe("setting:passwords"));
+
+        await adapter.ApplyAsync(new Dictionary<string, string> { [Id] = AccountsSyncAdapter.ToText(Work()), [Pwd] = "secret" }, NoDeletes, None);
+        var notApplied = await adapter.GetNotAppliedAsync(None);
+        Assert.Contains(Id, notApplied);
+        Assert.Contains(Pwd, notApplied);
+    }
+
+    [Fact]
+    public void AHeldAccount_KeepsTheNameItHasOnTheOtherDevices()
+    {
+        var held = new SyncHeldAccount { Email = "work@example.com", State = SyncHeldState.Skipped, Data = AccountsSyncAdapter.ToText(Work(name: "My work mail")) };
+        Assert.Equal("My work mail", AccountsSyncAdapter.DisplayNameOf(held));
+        Assert.Equal(string.Empty, AccountsSyncAdapter.DisplayNameOf(new SyncHeldAccount { Email = "x@y.z", Data = null }));
+    }
 
     [Fact]
     public async Task Reading_GivesSettingsAndPassword_AsSeparateItems_AndNeverTokens()
@@ -110,6 +134,7 @@ public class AccountsSyncTests : IDisposable
 
         await adapter.ApplyAsync(One(Pwd, "secret"), NoDeletes, None);
         Assert.Equal("secret", Assert.Single(await _stores.Accounts.LoadAllAsync()).Password);
+        Assert.Contains(("work@example.com", "secret"), _changed); // the running app is told too
     }
 
     [Fact]

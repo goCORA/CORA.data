@@ -78,6 +78,8 @@ public class MailKitEmailService : IEmailService
 
     public event EventHandler? CurrentAccountChanged;
 
+    public event EventHandler? AccountsChanged;
+
     public MailAccount? CurrentAccount
     {
         get => _currentAccount;
@@ -179,6 +181,7 @@ public class MailKitEmailService : IEmailService
             return; // already registered
         _accounts.Add(account);
         CurrentAccount ??= account;
+        AccountsChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public void SignOut()
@@ -200,6 +203,7 @@ public class MailKitEmailService : IEmailService
         _accounts.Remove(account);
         if (CurrentAccount == account)
             CurrentAccount = _accounts.Count > 0 ? _accounts[0] : null;
+        AccountsChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public void DeactivateAccount(MailAccount account)

@@ -95,7 +95,12 @@ public class SyncEngineTests
         private string? _owner;
         private readonly Dictionary<string, SyncKindState> _kinds = [];
         private readonly Dictionary<string, SyncItemState> _items = [];
+        private readonly Dictionary<string, string> _values = [];
+        public List<SyncHistoryEntry> History { get; } = [];
 
+        public Task AddHistoryAsync(IEnumerable<SyncHistoryEntry> entries, CancellationToken cancellationToken = default) { History.AddRange(entries); return Task.CompletedTask; }
+        public Task<List<SyncHistoryEntry>> GetHistoryAsync(CancellationToken cancellationToken = default) => Task.FromResult(History.ToList());
+        public Task RemoveHistoryAsync(DateTime? beforeUtc, CancellationToken cancellationToken = default) { History.Clear(); return Task.CompletedTask; }
         public Task<string?> GetOwnerAsync(CancellationToken cancellationToken = default) => Task.FromResult(_owner);
         public Task SetOwnerAsync(string ownerUid, CancellationToken cancellationToken = default) { _owner = ownerUid; return Task.CompletedTask; }
         public Task<SyncKindState> GetKindAsync(string kind, CancellationToken cancellationToken = default) =>
@@ -112,8 +117,8 @@ public class SyncEngineTests
         public Task<List<SyncHeldAccount>> GetHeldAccountsAsync(CancellationToken cancellationToken = default) => Task.FromResult(new List<SyncHeldAccount>());
         public Task SetHeldAccountAsync(SyncHeldAccount account, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task RemoveHeldAccountAsync(string emailAddress, CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task<string?> GetValueAsync(string key, CancellationToken cancellationToken = default) => Task.FromResult<string?>(null);
-        public Task SetValueAsync(string key, string value, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task<string?> GetValueAsync(string key, CancellationToken cancellationToken = default) => Task.FromResult(_values.GetValueOrDefault(key));
+        public Task SetValueAsync(string key, string value, CancellationToken cancellationToken = default) { _values[key] = value; return Task.CompletedTask; }
         public Task<List<SyncPendingTag>> GetPendingTagsAsync(CancellationToken cancellationToken = default) => Task.FromResult(new List<SyncPendingTag>());
         public Task SetPendingTagAsync(SyncPendingTag tag, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task RemovePendingTagAsync(string accountKey, string messageId, CancellationToken cancellationToken = default) => Task.CompletedTask;
@@ -146,6 +151,62 @@ public class SyncEngineTests
         await phone.SyncAsync();
         Assert.Equal(pc.Data.Items, phone.Data.Items);
         Assert.Equal(1, cloud.Uploads);
+    }
+
+    [Fact]
+    public async Task History_ListsWhatWentOutAndCameIn_CountedAndNeverTheContent()
+    {
+        var cloud = new FakeCloud();
+        var (pc, phone) = (new Device(cloud, "pc"), new Device(cloud, "phone"));
+        pc.Data.Items["a"] = "Anna";
+        pc.Data.Items["b"] = "Ben";
+        await pc.SyncAsync();
+        await phone.SyncAsync();
+        pc.State.History.Clear();
+        phone.State.History.Clear();
+
+        pc.Data.Items["a"] = "Anne";
+        pc.Data.Items.Remove("b");
+        await pc.SyncAsync();
+        await phone.SyncAsync();
+        await phone.SyncAsync();
+
+        Assert.Equal(2, pc.State.History.Count);
+        Assert.All(pc.State.History, h => Assert.False(h.Incoming));
+        Assert.Contains(pc.State.History, h => h.Item == "contacts" && !h.Removed && h.Count == 1);
+        Assert.Contains(pc.State.History, h => h.Item == "contacts" && h.Removed && h.Count == 1);
+        Assert.Equal(2, phone.State.History.Count);
+        Assert.All(phone.State.History, h => Assert.True(h.Incoming));
+    }
+
+    [Fact]
+    public async Task History_FirstSyncOfTheSameItems_ListsNothing()
+    {
+        var cloud = new FakeCloud();
+        var (pc, phone) = (new Device(cloud, "pc"), new Device(cloud, "phone"));
+        pc.Data.Items["a"] = "Anna";
+        phone.Data.Items["a"] = "Anna";
+        await pc.SyncAsync();
+        await phone.SyncAsync();
+        Assert.Empty(phone.State.History);
+    }
+
+    [Fact]
+    public async Task History_ListsAnEditOnlyOnceItHasLeft_EvenWhenTheUploadFailsFirst()
+    {
+        var cloud = new FakeCloud();
+        var pc = new Device(cloud, "pc");
+        pc.Data.Items["a"] = "Anna";
+        cloud.LoseNextUpload = true;
+        await pc.SyncAsync();
+        Assert.Empty(pc.State.History);
+
+        await pc.SyncAsync();
+        var line = Assert.Single(pc.State.History);
+        Assert.False(line.Incoming);
+        Assert.Equal(1, line.Count);
+        await pc.SyncAsync();
+        Assert.Single(pc.State.History);
     }
 
     [Fact]
