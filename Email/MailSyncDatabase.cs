@@ -11,8 +11,13 @@ namespace CORA.Data.Email;
 /// Singleton — the database file/collections are created on first use. The backing
 /// file is encrypted at rest via <see cref="EncryptedLiteDbFile"/>.
 /// </summary>
-public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
+public class MailSyncDatabase : IMailSyncStore, ILocalMailArchive, IFlushableStore, IDisposable
 {
+    private const string SummariesCollection = "MailSummaries";
+    private const string BodiesCollection = "MessageBodies";
+    private const string DeletedCollection = "DeletedUidls";
+    private const string CustomFoldersCollection = "CustomFolders";
+
     private readonly EncryptedLiteDbFile _file;
     private readonly ILiteCollection<MailSummaryDoc> _summaries;
     private readonly ILiteCollection<DeletedUidlDoc> _deletedUidls;
@@ -822,6 +827,165 @@ public class MailSyncDatabase : IMailSyncStore, IFlushableStore, IDisposable
 
     public Stream OpenAttachment(string cachePath) =>
         File.OpenRead(cachePath);
+
+    public Task<LocalMailExport> ExportLocalMailAsync(
+        string destinationPath, IReadOnlyCollection<string> pop3AccountKeys, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            var pop3 = new HashSet<string>(pop3AccountKeys, StringComparer.OrdinalIgnoreCase);
+            var attachments = new List<string>();
+            var messages = 0;
+            using var export = EncryptedLiteDbFile.Open(destinationPath);
+            var summaries = export.Database.GetCollection<MailSummaryDoc>(SummariesCollection);
+            var bodies = export.Database.GetCollection<MessageBodyDoc>(BodiesCollection);
+
+            foreach (var summary in _summaries.FindAll().Where(s => s.IsLocalOnly || pop3.Contains(s.AccountKey)))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                summaries.Upsert(summary);
+                messages++;
+                if (_bodies.FindById(summary.Id) is not { } body)
+                    continue;
+                body.Attachments = body.Attachments.Select(a => ForExport(a, attachments)).ToList();
+                bodies.Upsert(body);
+            }
+
+            var deleted = export.Database.GetCollection<DeletedUidlDoc>(DeletedCollection);
+            var folders = export.Database.GetCollection<CustomFolderDoc>(CustomFoldersCollection);
+            foreach (var account in pop3)
+            {
+                deleted.Upsert(_deletedUidls.Find(d => d.AccountKey == account));
+                folders.Upsert(_customFolders.Find(f => f.AccountKey == account));
+            }
+            export.Flush();
+            return new LocalMailExport(messages, attachments);
+        }, cancellationToken);
+
+    // Saved paths differ between devices, so a backup holds them relative to the attachments folder.
+    private StoredMailAttachment ForExport(StoredMailAttachment attachment, List<string> attachments)
+    {
+        var relative = string.Empty;
+        if (!string.IsNullOrEmpty(attachment.CachePath) && File.Exists(attachment.CachePath))
+        {
+            relative = Path.GetRelativePath(_attachmentsRoot, attachment.CachePath).Replace('\\', '/');
+            if (relative.StartsWith("..", StringComparison.Ordinal))
+                relative = string.Empty;
+            else
+                attachments.Add(relative);
+        }
+        return new StoredMailAttachment
+        {
+            PartSpecifier = attachment.PartSpecifier,
+            FileName = attachment.FileName,
+            ContentType = attachment.ContentType,
+            Size = attachment.Size,
+            CachePath = relative,
+        };
+    }
+
+    public Task<int> MergeLocalMailAsync(string pendingPath, string pendingAttachmentsDirectory, CancellationToken cancellationToken = default) =>
+        Task.Run(() =>
+        {
+            if (!File.Exists(pendingPath))
+                return 0;
+
+            var added = 0;
+            using (var pending = EncryptedLiteDbFile.Open(pendingPath))
+            {
+                var bodies = pending.Database.GetCollection<MessageBodyDoc>(BodiesCollection);
+                var known = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+                var usedUids = new Dictionary<(string Account, string Folder), HashSet<uint>>();
+
+                foreach (var summary in pending.Database.GetCollection<MailSummaryDoc>(SummariesCollection).FindAll())
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (!known.TryGetValue(summary.AccountKey, out var seen))
+                        known[summary.AccountKey] = seen = KnownMessages(summary.AccountKey);
+
+                    // Matched anywhere in the account: mail moved to a folder since the backup stays one message.
+                    if (seen.Contains(UidlMark(summary.Uidl))
+                        || (!string.IsNullOrEmpty(summary.MessageId) && seen.Contains(summary.MessageId)))
+                        continue;
+
+                    var accountKey = summary.AccountKey;
+                    var folderName = summary.FolderName;
+                    if (!usedUids.TryGetValue((accountKey, folderName), out var uids))
+                        usedUids[(accountKey, folderName)] = uids = _summaries.Find(s => s.AccountKey == accountKey && s.FolderName == folderName).Select(s => s.Uid).ToHashSet();
+                    if (!uids.Add(summary.Uid))
+                    {
+                        summary.Uid = NextUid(accountKey, folderName);
+                        uids.Add(summary.Uid);
+                    }
+
+                    _summaries.Upsert(summary);
+                    seen.Add(UidlMark(summary.Uidl));
+                    if (!string.IsNullOrEmpty(summary.MessageId))
+                        seen.Add(summary.MessageId);
+                    if (bodies.FindById(summary.Id) is { } body)
+                    {
+                        foreach (var attachment in body.Attachments)
+                            attachment.CachePath = RestoreAttachment(attachment.CachePath, pendingAttachmentsDirectory);
+                        _bodies.Upsert(body);
+                    }
+                    added++;
+                }
+
+                foreach (var deleted in pending.Database.GetCollection<DeletedUidlDoc>(DeletedCollection).FindAll())
+                {
+                    if (_deletedUidls.FindById(deleted.Id) is null)
+                        _deletedUidls.Insert(deleted);
+                }
+                foreach (var custom in pending.Database.GetCollection<CustomFolderDoc>(CustomFoldersCollection).FindAll())
+                {
+                    if (_customFolders.FindById(custom.Id) is null)
+                        _customFolders.Insert(custom);
+                }
+            }
+
+            // The pending file goes only after this: an interrupted merge runs again at the next
+            // start, and what it already added is skipped.
+            _file.Flush();
+            File.Delete(pendingPath);
+            if (Directory.Exists(pendingAttachmentsDirectory))
+                Directory.Delete(pendingAttachmentsDirectory, recursive: true);
+            return added;
+        }, cancellationToken);
+
+    private static string UidlMark(string uidl) => "uidl:" + uidl;
+
+    private HashSet<string> KnownMessages(string accountKey)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var summary in _summaries.Find(s => s.AccountKey == accountKey))
+        {
+            seen.Add(UidlMark(summary.Uidl));
+            if (!string.IsNullOrEmpty(summary.MessageId))
+                seen.Add(summary.MessageId);
+        }
+        return seen;
+    }
+
+    // Copied, not moved: the pending folder must survive until the merge has been saved.
+    private string RestoreAttachment(string relative, string pendingDirectory)
+    {
+        if (string.IsNullOrEmpty(relative))
+            return string.Empty;
+        var source = InsideFolder(pendingDirectory, relative);
+        var destination = InsideFolder(_attachmentsRoot, relative);
+        if (source is null || destination is null || !File.Exists(source))
+            return string.Empty;
+        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        File.Copy(source, destination, overwrite: true);
+        return destination;
+    }
+
+    // The path inside the folder, or null when a name would leave it ("../").
+    private static string? InsideFolder(string folder, string relative)
+    {
+        var root = Path.GetFullPath(folder);
+        var path = Path.GetFullPath(Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar)));
+        return path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal) ? path : null;
+    }
 
     public Task UpsertFoldersAsync(
         string accountKey, IEnumerable<MailFolderInfo> folders, CancellationToken cancellationToken = default) =>

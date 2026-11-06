@@ -297,10 +297,23 @@ public sealed class SecureDataStores : IDataStores, IDisposable
 
         // Each database plus anything named after it: the atomic-flush ".tmp", the
         // ".legacy-plaintext" migration copy and the ".unrecovered-*.bak" safety copies.
-        foreach (var name in StoreFiles.Databases.Append(StoreFiles.SyncState))
+        foreach (var name in StoreFiles.Databases.Append(StoreFiles.SyncState).Append(StoreFiles.PendingLocalMail))
         {
             foreach (var file in Directory.EnumerateFiles(baseDir, name + "*").ToList())
                 TryDeleteFile(file, failed);
+        }
+
+        var pendingAttachments = Path.Combine(baseDir, StoreFiles.PendingMailAttachments);
+        if (Directory.Exists(pendingAttachments))
+        {
+            try
+            {
+                Directory.Delete(pendingAttachments, recursive: true);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                failed.Add(pendingAttachments);
+            }
         }
 
         var attachments = Path.Combine(baseDir, StoreFiles.AttachmentsDirectory);

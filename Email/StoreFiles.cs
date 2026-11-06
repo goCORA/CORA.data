@@ -25,6 +25,13 @@ internal static class StoreFiles
     /// </summary>
     public const string SyncState = "sync_state.litedb";
 
+    /// <summary>
+    /// Mail waiting to merge after an online restore, and its attachments. Not in
+    /// <see cref="Databases"/>: they exist only between the restore and the next start.
+    /// </summary>
+    public const string PendingLocalMail = "local_mail.litedb";
+    public const string PendingMailAttachments = "local_mail_attachments";
+
     /// <summary>Subdirectory of the app data directory holding synced (POP3) attachments.</summary>
     public const string AttachmentsDirectory = "mail_attachments";
 

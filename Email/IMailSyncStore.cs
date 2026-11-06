@@ -81,6 +81,29 @@ public sealed class StoredMailAttachment
     public string CachePath { get; set; } = string.Empty;
 }
 
+/// <summary>What an export of local-only mail wrote: the attachments are relative to the attachments folder.</summary>
+public sealed record LocalMailExport(int Messages, IReadOnlyList<string> Attachments);
+
+/// <summary>
+/// Online backups (claude/design-cloud-backup-sync.md, section 7): mail that exists only on this
+/// device, POP3 accounts' mail and IMAP accounts' local Sent mail, taken out into a file of its own
+/// and added back after a restore. Implemented by <see cref="MailSyncDatabase"/>.
+/// </summary>
+public interface ILocalMailArchive
+{
+    /// <summary>Writes the local-only mail to a new encrypted file. Only reads the mailbox.</summary>
+    Task<LocalMailExport> ExportLocalMailAsync(
+        string destinationPath, IReadOnlyCollection<string> pop3AccountKeys, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Adds what's missing from an exported file, then deletes it and its attachments folder.
+    /// Never changes or removes mail already here. Must run before anything else uses the mailbox.
+    /// An interrupted merge runs again at the next start. Returns how many messages were added; 0
+    /// when there is no file.
+    /// </summary>
+    Task<int> MergeLocalMailAsync(string pendingPath, string pendingAttachmentsDirectory, CancellationToken cancellationToken = default);
+}
+
 /// <summary>
 /// Local persistence for POP3 message UIDLs so that repeated syncs only download
 /// headers for messages that have not been seen before. POP3 has no server-side

@@ -201,6 +201,59 @@ public sealed class DatabaseBackupService
     }
 
     /// <summary>
+    /// Zips an online backup into <paramref name="destination"/>: the exported local-only mail and
+    /// its attachments, and the AI autonomy settings. Sync and goCORA's cloud key records hold the
+    /// rest, and other IMAP mail downloads again. <paramref name="attachments"/> are relative to the
+    /// attachments folder, as <see cref="LocalMailExport"/> gives them.
+    /// </summary>
+    public void CreateOnlineBackupArchive(Stream destination, string localMailPath, IEnumerable<string> attachments)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        ArgumentNullException.ThrowIfNull(attachments);
+
+        var baseDir = _dataLocation.AppDataDirectory;
+        using var zip = new ZipArchive(destination, ZipArchiveMode.Create, leaveOpen: true);
+        zip.CreateEntryFromFile(localMailPath, StoreFiles.PendingLocalMail, CompressionLevel.Optimal);
+
+        var aiAutonomy = Path.Combine(baseDir, StoreFiles.AiAutonomy);
+        if (File.Exists(aiAutonomy))
+        {
+            using var fileStream = new FileStream(aiAutonomy, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var entryStream = zip.CreateEntry(StoreFiles.AiAutonomy, CompressionLevel.Optimal).Open();
+            fileStream.CopyTo(entryStream);
+        }
+
+        var root = Path.Combine(baseDir, AttachmentsDirectoryName);
+        foreach (var relative in attachments.Distinct())
+        {
+            var path = Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar));
+            if (File.Exists(path))
+                zip.CreateEntryFromFile(path, $"{StoreFiles.PendingMailAttachments}/{relative}", CompressionLevel.Optimal);
+        }
+    }
+
+    /// <summary>
+    /// Extracts an online backup: its mail stays beside the mailbox and merges at the next start
+    /// (<see cref="ILocalMailArchive"/>). Anything else in the archive is ignored.
+    /// </summary>
+    public void RestoreOnlineBackupArchive(Stream source, bool restoreMail, bool restoreAiAutonomy)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+
+        var baseDir = _dataLocation.AppDataDirectory;
+        using var zip = new ZipArchive(source, ZipArchiveMode.Read, leaveOpen: true);
+        foreach (var entry in zip.Entries)
+        {
+            var name = EntryName(entry);
+            var wanted = name.EndsWith('/') ? false
+                : IsIn(name, StoreFiles.PendingMailAttachments) || name == StoreFiles.PendingLocalMail ? restoreMail
+                : name == StoreFiles.AiAutonomy && restoreAiAutonomy;
+            if (wanted)
+                Extract(entry, baseDir, name);
+        }
+    }
+
+    /// <summary>
     /// Restores a goCORA backup file (made through the CORA key code) into <paramref name="destZipPath"/>,
     /// and adds the master key it carries to this device's retired keys, so the restored database
     /// files open at the next start. Needs secure email open (see <see cref="AccountBackup.RestoreFileAsync"/>).
