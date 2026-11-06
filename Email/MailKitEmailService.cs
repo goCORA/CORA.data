@@ -731,6 +731,17 @@ public class MailKitEmailService : IEmailService
             })
             .ToList();
 
+            // goCORA's own Sent folder: a list row names who it went to, not this account.
+            if (string.Equals(cacheFolder, SentFolderName, StringComparison.OrdinalIgnoreCase))
+            {
+                var page = cached.Skip(skip).Take(take).ToList();
+                for (var i = 0; i < page.Count; i++)
+                {
+                    var body = await _syncStore.GetBodyAsync(accountKey, cacheFolder, page[i].Uidl, cancellationToken).ConfigureAwait(false);
+                    list[i].To = body?.To ?? string.Empty;
+                }
+            }
+
             // Resolve avatars: local contact photos only (app-level ContactDatabase), else initials.
             // Avoid heavy network calls here; callers may update AvatarUrl later. For now, only
             // consult the trusted-image sender store to decide whether to allow message-level

@@ -16,6 +16,13 @@ public class EmailSummary : INotifyPropertyChanged
     public string FolderName { get; set; } = string.Empty;
 
     public string From { get; set; } = string.Empty;
+
+    /// <summary>Who it went to. Only filled in goCORA's own Sent folder.</summary>
+    public string To { get; set; } = string.Empty;
+
+    /// <summary>The person a list row shows: the sender, or the recipient of sent mail.</summary>
+    public string Party => string.IsNullOrEmpty(To) ? From : To;
+
     public string Subject { get; set; } = string.Empty;
     public DateTimeOffset Date { get; set; }
 
