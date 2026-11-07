@@ -42,6 +42,8 @@
     <Compile Include="..\..\..\CORA.App\Services\AI\EmailActionRiskDecider.cs" Link="App\Linked\EmailActionRiskDecider.cs" />
     <Compile Include="..\..\..\CORA.App\Services\AI\StructuredAiResults.cs" Link="App\Linked\StructuredAiResults.cs" />
     <Compile Include="..\..\..\CORA.App\Services\AI\AiErrorMessages.cs" Link="App\Linked\AiErrorMessages.cs" />
+    <Compile Include="..\..\..\CORA.App\Services\Tips\TipCatalog.cs" Link="App\Linked\TipCatalog.cs" />
+    <Compile Include="..\..\..\CORA.App\Services\Tips\TipRotation.cs" Link="App\Linked\TipRotation.cs" />
   </ItemGroup>
 
   <!-- Rust core: copy the Windows library next to the tests (debug build first, else the release build in dist). -->
