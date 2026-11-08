@@ -10,13 +10,16 @@ namespace CORA.Data.Email;
 /// -----------------------------------------------------------------------------
 ///
 /// -----BEGIN CORA MESSAGE-----
-/// (Base64, 76 characters per line, of: "CK" 0x01 | Key-Id (16 bytes) | encrypted body)
+/// (Base64, 76 characters per line, of: "CK" version | Key-Id (16 bytes) | encrypted body)
 /// -----END CORA MESSAGE-----
 /// </code>
 /// Since 2026-11-02 (claude/design-secure-email-key-routes.md) the email names no sending device:
 /// goCORA's key service finds it from the Key-Id. The Key-Id travels inside the Base64 block (not
 /// encrypted: the recipient needs it before having any key), so a mail program shows only the notice
 /// and one block. Older emails had readable <c>Key-Id:</c> / <c>Sender-Id:</c> lines; they are still read.
+/// Block version 2 (Rust core 0.19.0): the body of a 64-byte message key (key package version 3), i.e.
+/// [2 mup length][mup][wrapped commitment + CORA4]; version 1: a plain CORA4 body (32-byte keys, so also
+/// replies in conversations started before 0.19.0). Use <see cref="BlockVersionFor"/> to pick it.
 /// goCORA finds the encrypted part by the BEGIN/END markers only, so the notice and separator lines
 /// can be reworded later without breaking messages already sent.
 /// </summary>
@@ -34,25 +37,41 @@ public static class SecureMessageFormat
     public const string KeyIdPrefix = "Key-Id: ";
     public const string SenderIdPrefix = "Sender-Id: ";
 
-    // The block's binary header: "CK", version 1, then the 16-byte Key-Id.
-    private static readonly byte[] BlockMagic = [(byte)'C', (byte)'K', 1];
+    // The block's binary header: "CK", the block version (1 or 2), then the 16-byte Key-Id.
+    private const int BlockHeaderBytes = 3;
     private const int KeyIdBytes = 16;
+
+    /// <summary>Plain CORA4 body (32-byte message keys).</summary>
+    public const byte BlockVersion1 = 1;
+    /// <summary>The Rust 0.19.0 body (64-byte message keys: mup, mupActual wrap, key commitment).</summary>
+    public const byte BlockVersion2 = 2;
+
+    /// <summary>The block version for a body encrypted with <paramref name="keyPackage"/>: 2 for a
+    /// version-3 key package (64-byte key), 1 for older ones.</summary>
+    public static byte BlockVersionFor(ReadOnlySpan<byte> keyPackage) =>
+        keyPackage.Length > 0 && keyPackage[0] >= 3 ? BlockVersion2 : BlockVersion1;
 
     /// <summary>A new random key id (32 hex characters).</summary>
     public static string NewKeyId() => Guid.NewGuid().ToString("N");
 
-    /// <summary>Builds the plain-text email body for an encrypted payload and its Key-Id (32 hex characters).</summary>
-    public static string Build(string keyId, ReadOnlySpan<byte> payload)
+    /// <summary>Builds the plain-text email body for an encrypted payload and its Key-Id (32 hex characters).
+    /// <paramref name="blockVersion"/>: <see cref="BlockVersionFor"/> of the key package the payload was
+    /// encrypted with.</summary>
+    public static string Build(string keyId, ReadOnlySpan<byte> payload, byte blockVersion = BlockVersion1)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(keyId);
         if (keyId.Length != KeyIdBytes * 2)
             throw new ArgumentException("A Key-Id is 32 hex characters.", nameof(keyId));
+        if (blockVersion is not (BlockVersion1 or BlockVersion2))
+            throw new ArgumentOutOfRangeException(nameof(blockVersion), "The block version is 1 or 2.");
         var keyBytes = Convert.FromHexString(keyId);
 
-        var block = new byte[BlockMagic.Length + KeyIdBytes + payload.Length];
-        BlockMagic.CopyTo(block, 0);
-        keyBytes.CopyTo(block, BlockMagic.Length);
-        payload.CopyTo(block.AsSpan(BlockMagic.Length + KeyIdBytes));
+        var block = new byte[BlockHeaderBytes + KeyIdBytes + payload.Length];
+        block[0] = (byte)'C';
+        block[1] = (byte)'K';
+        block[2] = blockVersion;
+        keyBytes.CopyTo(block, BlockHeaderBytes);
+        payload.CopyTo(block.AsSpan(BlockHeaderBytes + KeyIdBytes));
         var base64 = Convert.ToBase64String(block);
 
         var sb = new StringBuilder(base64.Length + base64.Length / LineLength * 2 + 512);
@@ -127,10 +146,11 @@ public static class SecureMessageFormat
             return true;
         }
 
-        if (block.Length <= BlockMagic.Length + KeyIdBytes || !block.AsSpan(0, BlockMagic.Length).SequenceEqual(BlockMagic))
+        if (block.Length <= BlockHeaderBytes + KeyIdBytes || block[0] != (byte)'C' || block[1] != (byte)'K'
+            || block[2] is not (BlockVersion1 or BlockVersion2))
             return false;
-        keyId = Convert.ToHexString(block, BlockMagic.Length, KeyIdBytes).ToLowerInvariant();
-        payload = block[(BlockMagic.Length + KeyIdBytes)..];
+        keyId = Convert.ToHexString(block, BlockHeaderBytes, KeyIdBytes).ToLowerInvariant();
+        payload = block[(BlockHeaderBytes + KeyIdBytes)..];
         return true;
     }
 

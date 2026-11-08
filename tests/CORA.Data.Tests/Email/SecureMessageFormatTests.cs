@@ -79,4 +79,44 @@ public class SecureMessageFormatTests
       var list = SecureMessageFormat.SplitAddresses("Anna <Anna@Example.com>; mike@x.org, anna@example.com ,");
       Assert.Equal(new[] { "anna@example.com", "mike@x.org" }, list);
    }
+
+   [Fact]
+   public void Block_Version_2_Round_Trips_And_Is_Written_In_The_Header()
+   {
+      var payload = Enumerable.Range(0, 700).Select(i => (byte)(i * 7)).ToArray();
+      var body = SecureMessageFormat.Build(KeyId, payload, SecureMessageFormat.BlockVersion2);
+      Assert.True(SecureMessageFormat.TryParse(body, out var keyId, out var parsed));
+      Assert.Equal(KeyId, keyId);
+      Assert.Equal(payload, parsed);
+      Assert.Equal(new byte[] { (byte)'C', (byte)'K', 2 }, BlockBytes(body)[..3]);
+      Assert.Equal(new byte[] { (byte)'C', (byte)'K', 1 }, BlockBytes(SecureMessageFormat.Build(KeyId, payload))[..3]);
+   }
+
+   [Fact]
+   public void Block_Version_Follows_The_Key_Package_Version()
+   {
+      var v3 = new byte[89];
+      v3[0] = 3;
+      Assert.Equal(SecureMessageFormat.BlockVersion2, SecureMessageFormat.BlockVersionFor(v3));
+      Assert.Equal(SecureMessageFormat.BlockVersion1, SecureMessageFormat.BlockVersionFor([2, 0, 0]));
+      Assert.Equal(SecureMessageFormat.BlockVersion1, SecureMessageFormat.BlockVersionFor([1, 0, 0]));
+      Assert.Equal(SecureMessageFormat.BlockVersion1, SecureMessageFormat.BlockVersionFor([]));
+   }
+
+   [Fact]
+   public void Unknown_Block_Versions_Are_Refused()
+   {
+      Assert.Throws<ArgumentOutOfRangeException>(() => SecureMessageFormat.Build(KeyId, [1], 3));
+      var block = BlockBytes(SecureMessageFormat.Build(KeyId, [1, 2, 3], SecureMessageFormat.BlockVersion2));
+      block[2] = 3;
+      var body = SecureMessageFormat.BeginMarker + "\r\n" + Convert.ToBase64String(block) + "\r\n" + SecureMessageFormat.EndMarker;
+      Assert.False(SecureMessageFormat.TryParse(body, out _, out _));
+   }
+
+   private static byte[] BlockBytes(string body)
+   {
+      var begin = body.IndexOf(SecureMessageFormat.BeginMarker, StringComparison.Ordinal) + SecureMessageFormat.BeginMarker.Length;
+      var end = body.IndexOf(SecureMessageFormat.EndMarker, StringComparison.Ordinal);
+      return Convert.FromBase64String(string.Concat(body[begin..end].Split('\n').Select(l => l.Trim())));
+   }
 }
