@@ -530,7 +530,7 @@ public class MailSyncDatabase : IMailSyncStore, ILocalMailArchive, IFlushableSto
             var id = MakeKey(accountKey, folderFullName, uidl);
 
             var body = _bodies.FindById(id);
-            var cachePaths = body?.Attachments.Select(a => a.CachePath).Where(p => !string.IsNullOrEmpty(p)).ToList()
+            var cachePaths = body?.Attachments.Select(a => a.CachePath).Where(p => !string.IsNullOrEmpty(p)).Select(ResolveCachePath).ToList()
                               ?? [];
 
             _summaries.Delete(id);
@@ -826,7 +826,30 @@ public class MailSyncDatabase : IMailSyncStore, ILocalMailArchive, IFlushableSto
     }
 
     public Stream OpenAttachment(string cachePath) =>
-        File.OpenRead(cachePath);
+        File.OpenRead(ResolveCachePath(cachePath));
+
+    /// <summary>
+    /// The current location of a cached attachment. Paths are saved in full, but iOS gives the app
+    /// a new container folder when it's reinstalled or updated (…/Application/&lt;new id&gt;/…; the
+    /// data moves with it), so a saved path can point into a folder that no longer exists
+    /// ("Could not find a part of the path", iOS Simulator 2026-11-08). The part after the
+    /// attachments folder is still right, so it is looked up under the current one.
+    /// </summary>
+    internal string ResolveCachePath(string cachePath)
+    {
+        if (string.IsNullOrEmpty(cachePath) || File.Exists(cachePath))
+            return cachePath;
+        var normalized = cachePath.Replace('\\', '/');
+        var marker = "/" + StoreFiles.AttachmentsDirectory + "/";
+        var at = normalized.LastIndexOf(marker, StringComparison.Ordinal);
+        if (at < 0)
+            return cachePath;
+        var relative = normalized[(at + marker.Length)..];
+        if (relative.Length == 0 || relative.Split('/').Any(s => s == ".."))
+            return cachePath;
+        var candidate = Path.Combine(_attachmentsRoot, relative.Replace('/', Path.DirectorySeparatorChar));
+        return File.Exists(candidate) ? candidate : cachePath;
+    }
 
     public Task<LocalMailExport> ExportLocalMailAsync(
         string destinationPath, IReadOnlyCollection<string> pop3AccountKeys, CancellationToken cancellationToken = default) =>
@@ -865,9 +888,10 @@ public class MailSyncDatabase : IMailSyncStore, ILocalMailArchive, IFlushableSto
     private StoredMailAttachment ForExport(StoredMailAttachment attachment, List<string> attachments)
     {
         var relative = string.Empty;
-        if (!string.IsNullOrEmpty(attachment.CachePath) && File.Exists(attachment.CachePath))
+        var current = ResolveCachePath(attachment.CachePath);
+        if (!string.IsNullOrEmpty(current) && File.Exists(current))
         {
-            relative = Path.GetRelativePath(_attachmentsRoot, attachment.CachePath).Replace('\\', '/');
+            relative = Path.GetRelativePath(_attachmentsRoot, current).Replace('\\', '/');
             if (relative.StartsWith("..", StringComparison.Ordinal))
                 relative = string.Empty;
             else
