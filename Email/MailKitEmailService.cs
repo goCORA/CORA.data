@@ -886,7 +886,9 @@ public class MailKitEmailService : IEmailService
                 var fileName = part.FileName ?? "attachment";
 
                 await using var partStream = new MemoryStream();
-                await part.Content.DecodeToAsync(partStream, cancellationToken).ConfigureAwait(false);
+                // A part without content (malformed mail) is kept as an empty attachment.
+                if (part.Content is not null)
+                    await part.Content.DecodeToAsync(partStream, cancellationToken).ConfigureAwait(false);
                 partStream.Position = 0;
 
                 var cachePath = await _syncStore.SaveAttachmentAsync(
@@ -1041,7 +1043,9 @@ public class MailKitEmailService : IEmailService
                     var fileName = part.FileName ?? "attachment";
 
                     await using var partStream = new MemoryStream();
-                    await part.Content.DecodeToAsync(partStream, cancellationToken).ConfigureAwait(false);
+                    // A part without content (malformed mail) is kept as an empty attachment.
+                    if (part.Content is not null)
+                        await part.Content.DecodeToAsync(partStream, cancellationToken).ConfigureAwait(false);
                     partStream.Position = 0;
 
                     var cachePath = await _syncStore.SaveAttachmentAsync(
@@ -2380,10 +2384,11 @@ public class MailKitEmailService : IEmailService
     internal static async Task DecodeEntityAsync(
         MimeEntity entity, Stream destination, CancellationToken cancellationToken)
     {
-        if (entity is MimePart part)
-            await part.Content.DecodeToAsync(destination, cancellationToken).ConfigureAwait(false);
-        else if (entity is MessagePart messagePart)
-            await messagePart.Message.WriteToAsync(destination, cancellationToken).ConfigureAwait(false);
+        // A part without content (malformed mail) gives an empty file.
+        if (entity is MimePart { Content: { } content })
+            await content.DecodeToAsync(destination, cancellationToken).ConfigureAwait(false);
+        else if (entity is MessagePart { Message: { } message })
+            await message.WriteToAsync(destination, cancellationToken).ConfigureAwait(false);
     }
 
     // ---- goCORA mailbox registration (claude/design-secure-email-m4-app.md) ------------------
@@ -2525,7 +2530,13 @@ public class MailKitEmailService : IEmailService
         return imap;
     }
 
-    /// <summary>Writes MailKit's raw protocol traffic to the Debug output window.</summary>
+    /// <summary>
+    /// Writes MailKit's raw protocol traffic to the Debug output window (Debug builds only:
+    /// Debug.WriteLine is compiled out of Release). Passwords and tokens are masked: the client
+    /// sets its own secret detector here, and every secret it finds in a command (AUTH, LOGIN,
+    /// USER/PASS) is replaced with '*' before the line is written. Until 2026-11-08 the detector
+    /// was ignored, so a Debug build logged sign-in credentials (Base64) to the output/logcat.
+    /// </summary>
     private sealed class DebugProtocolLogger : IProtocolLogger
     {
         private sealed class NoSecrets : IAuthenticationSecretDetector
@@ -2534,7 +2545,14 @@ public class MailKitEmailService : IEmailService
                 Array.Empty<AuthenticationSecret>();
         }
 
-        public IAuthenticationSecretDetector AuthenticationSecretDetector { get; set; } = new NoSecrets();
+        private IAuthenticationSecretDetector _secrets = new NoSecrets();
+
+        [System.Diagnostics.CodeAnalysis.AllowNull]
+        public IAuthenticationSecretDetector AuthenticationSecretDetector
+        {
+            get => _secrets;
+            set => _secrets = value ?? new NoSecrets();
+        }
 
         private readonly string _tag;
 
@@ -2544,7 +2562,21 @@ public class MailKitEmailService : IEmailService
             System.Diagnostics.Debug.WriteLine($"[{_tag}-WIRE] Connect: {uri}");
 
         public void LogClient(byte[] buffer, int offset, int count) =>
-            System.Diagnostics.Debug.WriteLine($"[{_tag}-WIRE] C: {System.Text.Encoding.ASCII.GetString(buffer, offset, count).TrimEnd()}");
+            System.Diagnostics.Debug.WriteLine($"[{_tag}-WIRE] C: {System.Text.Encoding.ASCII.GetString(Masked(buffer, offset, count)).TrimEnd()}");
+
+        /// <summary>A copy of the command with every detected secret replaced by '*'.</summary>
+        private byte[] Masked(byte[] buffer, int offset, int count)
+        {
+            var copy = buffer.AsSpan(offset, count).ToArray();
+            foreach (var secret in _secrets.DetectSecrets(buffer, offset, count))
+            {
+                var start = Math.Max(secret.StartIndex - offset, 0);
+                var end = Math.Min(secret.StartIndex - offset + secret.Length, copy.Length);
+                for (var i = start; i < end; i++)
+                    copy[i] = (byte)'*';
+            }
+            return copy;
+        }
 
         public void LogServer(byte[] buffer, int offset, int count) =>
             System.Diagnostics.Debug.WriteLine($"[{_tag}-WIRE] S: {System.Text.Encoding.ASCII.GetString(buffer, offset, count).TrimEnd()}");
@@ -2559,9 +2591,10 @@ public class MailKitEmailService : IEmailService
         var pop3 = new Pop3Client(new DebugProtocolLogger("POP3"))
         {
 
-            SslProtocols = System.Security.Authentication.SslProtocols.Tls
-                         | System.Security.Authentication.SslProtocols.Tls11
-                         | System.Security.Authentication.SslProtocols.Tls12
+            // TLS 1.2 and 1.3 only, like IMAP and SMTP (MailKit's default). TLS 1.0/1.1 were
+            // allowed here until 2026-11-08: both have known weaknesses and mail providers have
+            // dropped them (Joe 2026-11-08: remove).
+            SslProtocols = System.Security.Authentication.SslProtocols.Tls12
                          | System.Security.Authentication.SslProtocols.Tls13,
             // Strict: only a certificate with no errors is accepted. This previously accepted
             // ANY certificate, which let anyone on the network impersonate the mail server.
