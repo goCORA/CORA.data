@@ -72,12 +72,33 @@ public sealed class ContactsSyncAdapter(IContactStore contacts) : ISyncAdapter
     }
 }
 
-/// <summary>Blocked senders, blocked domains and trusted senders.</summary>
-public sealed class ListsSyncAdapter(IBlacklistStore blacklist, ITrustedImageSenderStore trusted) : ISyncAdapter
+/// <summary>
+/// Blocked senders, blocked domains, trusted senders and recent recipients. Recent recipients ride
+/// in this kind (not a kind of their own) so goCORA's key service needs no change: each is
+/// <c>recent:&lt;address&gt;</c> with "&lt;uses, 1 or 2&gt;|&lt;don't ask, 0 or 1&gt;", so only the second use and
+/// "Don't ask again" change it, not every send.
+/// </summary>
+public sealed class ListsSyncAdapter(IBlacklistStore blacklist, ITrustedImageSenderStore trusted, IRecentRecipientStore recent) : ISyncAdapter
 {
     private const string Sender = "sender:";
     private const string Domain = "domain:";
     private const string Trusted = "trusted:";
+    private const string Recent = "recent:";
+
+    /// <summary>History names recent recipients apart from the other lists.</summary>
+    public const string RecentHistoryItem = "recent";
+
+    private static string RecentText(RecentRecipient r) => $"{Math.Min(r.UseCount, 2)}|{(r.DontAskToSave ? 1 : 0)}";
+
+    private static (int Uses, bool DontAsk) ParseRecent(string text)
+    {
+        var parts = text.Split('|');
+        var uses = parts.Length > 0 && int.TryParse(parts[0], out var n) ? Math.Clamp(n, 1, 2) : 1;
+        return (uses, parts.Length > 1 && parts[1] == "1");
+    }
+
+    public (string Item, string Detail) Describe(string itemId) =>
+        (itemId.StartsWith(Recent, StringComparison.Ordinal) ? RecentHistoryItem : Kind, string.Empty);
 
     public string Kind => "lists";
 
@@ -90,6 +111,8 @@ public sealed class ListsSyncAdapter(IBlacklistStore blacklist, ITrustedImageSen
             items[Domain + d] = "1";
         foreach (var t in await trusted.GetTrustedSendersAsync(cancellationToken).ConfigureAwait(false))
             items[Trusted + t] = "1";
+        foreach (var r in await recent.GetAllAsync(cancellationToken).ConfigureAwait(false))
+            items[Recent + r.Address] = RecentText(r);
         return items;
     }
 
@@ -97,8 +120,14 @@ public sealed class ListsSyncAdapter(IBlacklistStore blacklist, ITrustedImageSen
 
     public async Task ApplyAsync(IReadOnlyDictionary<string, string> upserts, IReadOnlyCollection<string> deletes, CancellationToken cancellationToken)
     {
-        foreach (var id in upserts.Keys)
+        foreach (var (id, text) in upserts)
         {
+            if (id.StartsWith(Recent, StringComparison.Ordinal))
+            {
+                var (uses, dontAsk) = ParseRecent(text);
+                await recent.MergeFromSyncAsync(id[Recent.Length..], uses, dontAsk, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
             if (id.StartsWith(Sender, StringComparison.Ordinal))
                 await blacklist.BlacklistSenderAsync(id[Sender.Length..], cancellationToken).ConfigureAwait(false);
             else if (id.StartsWith(Domain, StringComparison.Ordinal))
@@ -114,6 +143,8 @@ public sealed class ListsSyncAdapter(IBlacklistStore blacklist, ITrustedImageSen
                 await blacklist.RemoveDomainAsync(id[Domain.Length..], cancellationToken).ConfigureAwait(false);
             else if (id.StartsWith(Trusted, StringComparison.Ordinal))
                 await trusted.SetTrustedAsync(id[Trusted.Length..], false, cancellationToken).ConfigureAwait(false);
+            else if (id.StartsWith(Recent, StringComparison.Ordinal))
+                await recent.RemoveAsync(id[Recent.Length..], cancellationToken).ConfigureAwait(false);
         }
     }
 }

@@ -26,6 +26,12 @@ internal static class StoreFiles
     public const string SyncState = "sync_state.litedb";
 
     /// <summary>
+    /// Addresses sent to that weren't contacts. Deliberately not in <see cref="Databases"/>: no
+    /// backup carries it (subscribers' cloud sync does). <see cref="IDataStores.WipeAllAsync"/> deletes it too.
+    /// </summary>
+    public const string RecentRecipients = "recent_recipients.litedb";
+
+    /// <summary>
     /// Mail waiting to merge after an online restore, and its attachments. Not in
     /// <see cref="Databases"/>: they exist only between the restore and the next start.
     /// </summary>

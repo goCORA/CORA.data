@@ -22,6 +22,7 @@ public interface IDataStores : IDisposable
     IFolderOrderStore FolderOrder { get; }
     IAiResultCacheStore AiResultCache { get; }
     ISecureMessageKeyStore SecureMessageKeys { get; }
+    IRecentRecipientStore RecentRecipients { get; }
     ISyncStateStore SyncState { get; }
 
     /// <summary>Raised after a change that sync carries to other devices. May come from any thread.</summary>
@@ -122,6 +123,7 @@ public sealed class SecureDataStores : IDataStores, IDisposable
     private readonly FolderOrderDatabase _folderOrder;
     private readonly AiResultCacheDatabase _aiResultCache;
     private readonly SecureMessageKeyDatabase _secureMessageKeys;
+    private readonly RecentRecipientDatabase _recentRecipients;
     private readonly SyncStateDatabase _syncState;
     private readonly IFlushableStore[] _flushableStores;
     private readonly string _baseDir;
@@ -144,6 +146,7 @@ public sealed class SecureDataStores : IDataStores, IDisposable
     public IFolderOrderStore FolderOrder => _folderOrder;
     public IAiResultCacheStore AiResultCache => _aiResultCache;
     public ISecureMessageKeyStore SecureMessageKeys => _secureMessageKeys;
+    public IRecentRecipientStore RecentRecipients => _recentRecipients;
     public ISyncStateStore SyncState => _syncState;
     public event Action? SyncableDataChanged;
 
@@ -153,7 +156,7 @@ public sealed class SecureDataStores : IDataStores, IDisposable
         TrustedImageSenderDatabase trustedImageSenders, BlacklistDatabase blacklist,
         AiAutonomyDatabase aiAutonomy, ContactDatabase contacts, HiddenFolderDatabase hiddenFolders,
         FolderOrderDatabase folderOrder, AiResultCacheDatabase aiResultCache, SecureMessageKeyDatabase secureMessageKeys,
-        SyncStateDatabase syncState)
+        RecentRecipientDatabase recentRecipients, SyncStateDatabase syncState)
     {
         _baseDir = baseDir;
         _tags = tags;
@@ -167,8 +170,9 @@ public sealed class SecureDataStores : IDataStores, IDisposable
         _folderOrder = folderOrder;
         _aiResultCache = aiResultCache;
         _secureMessageKeys = secureMessageKeys;
+        _recentRecipients = recentRecipients;
         _syncState = syncState;
-        _flushableStores = [_tags, _mailSync, _accounts, _trustedImageSenders, _blacklist, _aiAutonomy, _contacts, _hiddenFolders, _folderOrder, _aiResultCache, _secureMessageKeys, _syncState];
+        _flushableStores = [_tags, _mailSync, _accounts, _trustedImageSenders, _blacklist, _aiAutonomy, _contacts, _hiddenFolders, _folderOrder, _aiResultCache, _secureMessageKeys, _recentRecipients, _syncState];
 
         // Option B: background safety-net flush, so a mid-session OS kill (which never
         // gives Dispose() a chance to run) loses at most a few seconds of writes instead
@@ -181,7 +185,7 @@ public sealed class SecureDataStores : IDataStores, IDisposable
             ScheduleContactsFlush();
             SyncableDataChanged?.Invoke();
         };
-        _tags.Changed = _blacklist.Changed = _trustedImageSenders.Changed = _accounts.Changed = () => SyncableDataChanged?.Invoke();
+        _tags.Changed = _blacklist.Changed = _trustedImageSenders.Changed = _accounts.Changed = _recentRecipients.Changed = () => SyncableDataChanged?.Invoke();
         _hiddenFolders.Changed += (_, _) => SyncableDataChanged?.Invoke();
         _folderOrder.Changed += (_, _) => SyncableDataChanged?.Invoke();
     }
@@ -297,7 +301,7 @@ public sealed class SecureDataStores : IDataStores, IDisposable
 
         // Each database plus anything named after it: the atomic-flush ".tmp", the
         // ".legacy-plaintext" migration copy and the ".unrecovered-*.bak" safety copies.
-        foreach (var name in StoreFiles.Databases.Append(StoreFiles.SyncState).Append(StoreFiles.PendingLocalMail))
+        foreach (var name in StoreFiles.Databases.Append(StoreFiles.SyncState).Append(StoreFiles.RecentRecipients).Append(StoreFiles.PendingLocalMail))
         {
             foreach (var file in Directory.EnumerateFiles(baseDir, name + "*").ToList())
                 TryDeleteFile(file, failed);
@@ -441,9 +445,10 @@ public sealed class SecureDataStores : IDataStores, IDisposable
 
         var folderOrder = new FolderOrderDatabase(Path.Combine(baseDir, StoreFiles.FolderOrder));
         var secureMessageKeys = new SecureMessageKeyDatabase(Path.Combine(baseDir, StoreFiles.SecureMessageKeys));
+        var recentRecipients = new RecentRecipientDatabase(Path.Combine(baseDir, StoreFiles.RecentRecipients));
         var syncState = new SyncStateDatabase(Path.Combine(baseDir, StoreFiles.SyncState));
 
-        return new SecureDataStores(baseDir, tags, mailSync, accounts, trustedImageSenders, blacklist, aiAutonomy, contacts, hiddenFolders, folderOrder, aiResultCache, secureMessageKeys, syncState);
+        return new SecureDataStores(baseDir, tags, mailSync, accounts, trustedImageSenders, blacklist, aiAutonomy, contacts, hiddenFolders, folderOrder, aiResultCache, secureMessageKeys, recentRecipients, syncState);
     }
 
     public void Dispose()
@@ -481,7 +486,7 @@ public sealed class SecureDataStores : IDataStores, IDisposable
 
         // Best-effort per store: a failed final flush in one (e.g. the atomic file replace
         // still being blocked after its retries) must not stop the others from flushing.
-        foreach (var store in (IDisposable[])[_tags, _mailSync, _accounts, _trustedImageSenders, _blacklist, _aiAutonomy, _contacts, _hiddenFolders, _folderOrder, _aiResultCache, _secureMessageKeys, _syncState])
+        foreach (var store in (IDisposable[])[_tags, _mailSync, _accounts, _trustedImageSenders, _blacklist, _aiAutonomy, _contacts, _hiddenFolders, _folderOrder, _aiResultCache, _secureMessageKeys, _recentRecipients, _syncState])
         {
             try
             {
