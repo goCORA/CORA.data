@@ -46,6 +46,13 @@ public interface IEmailService
     /// </summary>
     void AddAccount(MailAccount account);
 
+    /// <summary>
+    /// OAuth accounts: renews the sign-in token if it has expired or is about to (one call to the
+    /// provider's token service; no mail-server connection). Returns true when the account's
+    /// tokens changed, so the caller can save them. Never switches or adds accounts.
+    /// </summary>
+    Task<bool> RefreshSignInTokenAsync(MailAccount account, CancellationToken cancellationToken = default);
+
     /// <summary>Removes the current account from <see cref="Accounts"/> and switches to another if available.</summary>
     void SignOut();
 

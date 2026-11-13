@@ -174,6 +174,16 @@ public class MailKitEmailService : IEmailService
         CurrentAccount = account;
     }
 
+    public async Task<bool> RefreshSignInTokenAsync(MailAccount account, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(account);
+        if (!account.IsOAuth)
+            return false;
+        var before = (account.AccessToken, account.RefreshToken);
+        await EnsureAccessTokenAsync(account, cancellationToken).ConfigureAwait(false);
+        return before != (account.AccessToken, account.RefreshToken);
+    }
+
     public void AddAccount(MailAccount account)
     {
         ArgumentNullException.ThrowIfNull(account);
@@ -2494,6 +2504,9 @@ public class MailKitEmailService : IEmailService
         return code;
     }
 
+    /// <summary>How long connecting to an IMAP server (TCP + TLS) may take before giving up.</summary>
+    internal static readonly TimeSpan ImapConnectTimeout = TimeSpan.FromSeconds(20);
+
     internal static async Task<ImapClient> ConnectImapAsync(
         MailAccount account, CancellationToken cancellationToken)
     {
@@ -2504,12 +2517,24 @@ public class MailKitEmailService : IEmailService
             // Strict: only a certificate with no errors is accepted (see MailCertificateCheck).
             ServerCertificateValidationCallback = certificateCheck.Validate,
         };
+        // Connecting (including the TLS handshake) gets 20 s, like POP3 and SMTP. Without a limit
+        // MailKit waited 2 minutes per step, so a mail server that doesn't answer (a provider
+        // outage) kept the mailbox spinner going for minutes (Joe 2026-11-12). Unlike the
+        // Task.WhenAny pattern, cancelling also stops the attempt itself.
+        using var connectDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        connectDeadline.CancelAfter(ImapConnectTimeout);
         try
         {
             // "Refuse unencrypted connections" upgrades None to STARTTLS-required.
             await imap.ConnectAsync(account.ImapHost, account.ImapPort,
                 MailConnectionPolicy.Apply(ToSecureSocketOptions(account.ImapSecurity)),
-                cancellationToken).ConfigureAwait(false);
+                connectDeadline.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (connectDeadline.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            imap.Dispose();
+            throw new TimeoutException(
+                $"IMAP connection to {account.ImapHost}:{account.ImapPort} timed out after {ImapConnectTimeout.TotalSeconds:0} s.");
         }
         catch (Exception ex) when (certificateCheck.ToException(
             "IMAP", account.ImapHost, account.ImapPort, account.EmailAddress, ex) is { } certificateError)
