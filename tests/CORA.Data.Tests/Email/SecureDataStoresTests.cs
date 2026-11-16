@@ -340,4 +340,21 @@ public class SecureDataStoresTests : IDisposable
       stores.UseOwner(null, signedIn: false, showOwnerWhenSignedOut: false);
       Assert.Equal([("old@example.com", "Spam")], stores.HiddenFolders.GetAll());
    }
+
+   [Fact]
+   public async Task Shutdown_SavesOnceMore_AndTheStoresStayUsable()
+   {
+      var stores = await CreateStoresAsync();
+      await stores.Contacts.SaveAsync(new Contact { FirstName = "Ada", Email = "ada@example.com" });
+      var file = Path.Combine(_dir, "contacts.litedb");
+
+      stores.Shutdown();
+      var saved = File.ReadAllBytes(file);
+
+      // Late background work: no crash, and nothing more is written.
+      await stores.Contacts.SaveAsync(new Contact { FirstName = "Grace", Email = "grace@example.com" });
+      Assert.Equal(2, (await stores.Contacts.GetAllAsync()).Count);
+      stores.Flush();
+      Assert.Equal(saved, File.ReadAllBytes(file));
+   }
 }

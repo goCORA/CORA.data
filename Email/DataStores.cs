@@ -29,6 +29,14 @@ public interface IDataStores : IDisposable
     event Action? SyncableDataChanged;
 
     /// <summary>
+    /// For the end of the app: one last flush of every store, then no more writes to disk, while
+    /// the stores stay open. Work still running in the background (mail checks, timers) can then
+    /// finish harmlessly instead of hitting closed LiteDB files ("Cannot access a disposed object
+    /// ... ReaderWriterLockSlim"). Anything changed after this is not saved, as with Dispose.
+    /// </summary>
+    void Shutdown();
+
+    /// <summary>
     /// Chooses whose items the stores show (claude/design-per-account-ownership.md).
     /// Signed in (<paramref name="signedIn"/>): that goCORA account's items plus items without an
     /// owner; new items belong to the account. Signed out: items without an owner, plus the last
@@ -228,6 +236,19 @@ public sealed class SecureDataStores : IDataStores, IDisposable
             foreach (var store in set.Flushables)
                 yield return store;
         }
+    }
+
+    /// <inheritdoc/>
+    public void Shutdown()
+    {
+        lock (_flushLock)
+        {
+            if (_disposed || _flushSuppressed)
+                return;
+            FlushAllLocked();
+            _flushSuppressed = true;   // every later flush, the periodic one included, now does nothing
+        }
+        _autoFlushCts.Cancel();
     }
 
     /// <inheritdoc/>
