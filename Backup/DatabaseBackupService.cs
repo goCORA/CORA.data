@@ -40,6 +40,87 @@ public sealed class DatabaseBackupService
     /// The caller owns <paramref name="destination"/> (e.g. a temp file stream or a
     /// stream backed by a platform save-file dialog).
     /// </summary>
+    /// <summary>Marks a backup made per goCORA account (claude/design-per-account-ownership.md, decision 11).</summary>
+    public const string LayoutEntryName = "layout.txt";
+    private const string LayoutPerAccount = "per-account 1";
+
+    /// <summary>Folder in a per-account backup holding the backed-up account's store files.</summary>
+    public const string OwnerFolder = "owner";
+
+    /// <summary>
+    /// What a per-account local backup holds: the account's own store files (<paramref name="OwnerUid"/>,
+    /// null for none), the stores without an owner when <paramref name="IncludeOwnerless"/>, the mail
+    /// of those mail accounts (exported to <paramref name="LocalMailPath"/> with its
+    /// <paramref name="MailAttachments"/>), and the photos of those contacts.
+    /// </summary>
+    public sealed record BackupContent(
+        string? OwnerUid, bool IncludeOwnerless, string LocalMailPath,
+        IReadOnlyCollection<string> MailAttachments, IReadOnlySet<string> ContactPhotos);
+
+    /// <summary>
+    /// A local backup, per goCORA account: <c>owner/</c> holds the account's store files; the
+    /// stores without an owner are at the top only if the user chose to include them. The mail is
+    /// that of the included mail accounts only (never another account's), as a mail file that is
+    /// added on restore, like an online backup's. Contact photos: only those of included contacts.
+    /// </summary>
+    public void CreateBackupArchive(Stream destination, BackupContent content)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        ArgumentNullException.ThrowIfNull(content);
+
+        var baseDir = _dataLocation.AppDataDirectory;
+        using var zip = new ZipArchive(destination, ZipArchiveMode.Create, leaveOpen: true);
+        using (var writer = new StreamWriter(zip.CreateEntry(LayoutEntryName).Open()))
+            writer.Write(LayoutPerAccount);
+
+        var storeFiles = DatabaseFileNames.Where(n => n != StoreFiles.MailSync).ToList();
+        if (OwnerStoreSet.IsValidOwnerUid(content.OwnerUid))
+        {
+            var ownerDir = OwnerStoreSet.OwnerDirectory(baseDir, content.OwnerUid!);
+            foreach (var name in storeFiles)
+                AddFile(zip, Path.Combine(ownerDir, name), OwnerFolder + "/" + name);
+        }
+        if (content.IncludeOwnerless)
+        {
+            foreach (var name in storeFiles)
+                AddFile(zip, Path.Combine(baseDir, name), name);
+        }
+
+        zip.CreateEntryFromFile(content.LocalMailPath, StoreFiles.PendingLocalMail, CompressionLevel.Optimal);
+        var attachments = Path.Combine(baseDir, AttachmentsDirectoryName);
+        foreach (var relative in content.MailAttachments.Distinct())
+        {
+            var path = Path.Combine(attachments, relative.Replace('/', Path.DirectorySeparatorChar));
+            if (File.Exists(path))
+                zip.CreateEntryFromFile(path, $"{StoreFiles.PendingMailAttachments}/{relative}", CompressionLevel.Optimal);
+        }
+
+        var photos = Path.Combine(baseDir, ContactPhotosDirectoryName);
+        foreach (var name in content.ContactPhotos)
+        {
+            if (name.Length > 0 && !name.Contains('/') && !name.Contains('\\') && File.Exists(Path.Combine(photos, name)))
+                zip.CreateEntryFromFile(Path.Combine(photos, name), ContactPhotosDirectoryName + "/" + name, CompressionLevel.Optimal);
+        }
+    }
+
+    // A store file read while it may be open elsewhere; skipped (not fatal) if it can't be read.
+    private static void AddFile(ZipArchive zip, string fullPath, string entryName)
+    {
+        if (!File.Exists(fullPath))
+            return;
+        try
+        {
+            using var fileStream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var entryStream = zip.CreateEntry(entryName, CompressionLevel.Optimal).Open();
+            fileStream.CopyTo(entryStream);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"CreateBackupArchive: could not include {fullPath}: {ex}");
+        }
+    }
+
+    /// <summary>The backup layout from before per-account data (everything at the top, the whole mail file). Kept for older callers and tests.</summary>
     public void CreateBackupArchive(Stream destination)
     {
         ArgumentNullException.ThrowIfNull(destination);
@@ -142,7 +223,13 @@ public sealed class DatabaseBackupService
     /// database files, overwriting any existing ones. Callers can choose which logical
     /// stores to restore.
     /// </summary>
-    public void RestoreBackupArchive(Stream source, bool restoreAccounts, bool restoreTags, bool restoreContacts, bool restoreMailboxes, bool restoreTrustedImageSenders, bool restoreBlacklist, bool restoreAiAutonomy, bool restoreAiResultCache)
+    /// <summary>
+    /// Restores the selected parts. A per-account backup's <c>owner/</c> files go to
+    /// <paramref name="ownerUid"/>'s own stores (the restoring account, decision 11); its other store
+    /// files stay without an owner; its mail is added at the next start (never replacing mail).
+    /// A backup from before per-account data restores as it always did, without an owner.
+    /// </summary>
+    public void RestoreBackupArchive(Stream source, bool restoreAccounts, bool restoreTags, bool restoreContacts, bool restoreMailboxes, bool restoreTrustedImageSenders, bool restoreBlacklist, bool restoreAiAutonomy, bool restoreAiResultCache, string? ownerUid = null)
     {
         ArgumentNullException.ThrowIfNull(source);
 
@@ -179,6 +266,24 @@ public sealed class DatabaseBackupService
             if (name.Length == 0 || name.EndsWith('/'))
                 continue; // directory entry
 
+            // Per-account backups: the account's own files, and the mail to add at the next start.
+            if (IsIn(name, OwnerFolder))
+            {
+                var inner = name[(OwnerFolder.Length + 1)..];
+                if (inner.Contains('/') || !allowFiles.Contains(inner) || inner == StoreFiles.MailSync)
+                    continue;
+                Extract(entry, baseDir, OwnerStoreSet.IsValidOwnerUid(ownerUid)
+                    ? $"{OwnerStoreSet.OwnersDirectoryName}/{ownerUid}/{inner}"
+                    : inner);
+                continue;
+            }
+            if (name == StoreFiles.PendingLocalMail || IsIn(name, StoreFiles.PendingMailAttachments))
+            {
+                if (restoreMailboxes)
+                    Extract(entry, baseDir, name);
+                continue;
+            }
+
             // Mail attachments come back with the mailboxes, contact photos with the contacts;
             // everything else must be an allowed top-level database file.
             if (IsIn(name, AttachmentsDirectoryName))
@@ -206,7 +311,7 @@ public sealed class DatabaseBackupService
     /// rest, and other IMAP mail downloads again. <paramref name="attachments"/> are relative to the
     /// attachments folder, as <see cref="LocalMailExport"/> gives them.
     /// </summary>
-    public void CreateOnlineBackupArchive(Stream destination, string localMailPath, IEnumerable<string> attachments)
+    public void CreateOnlineBackupArchive(Stream destination, string localMailPath, IEnumerable<string> attachments, string? ownerUid = null)
     {
         ArgumentNullException.ThrowIfNull(destination);
         ArgumentNullException.ThrowIfNull(attachments);
@@ -215,7 +320,10 @@ public sealed class DatabaseBackupService
         using var zip = new ZipArchive(destination, ZipArchiveMode.Create, leaveOpen: true);
         zip.CreateEntryFromFile(localMailPath, StoreFiles.PendingLocalMail, CompressionLevel.Optimal);
 
-        var aiAutonomy = Path.Combine(baseDir, StoreFiles.AiAutonomy);
+        // The account's own AI settings (an online backup never holds items without an owner).
+        var aiAutonomy = OwnerStoreSet.IsValidOwnerUid(ownerUid)
+            ? Path.Combine(OwnerStoreSet.OwnerDirectory(baseDir, ownerUid!), StoreFiles.AiAutonomy)
+            : Path.Combine(baseDir, StoreFiles.AiAutonomy);
         if (File.Exists(aiAutonomy))
         {
             using var fileStream = new FileStream(aiAutonomy, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
@@ -236,7 +344,7 @@ public sealed class DatabaseBackupService
     /// Extracts an online backup: its mail stays beside the mailbox and merges at the next start
     /// (<see cref="ILocalMailArchive"/>). Anything else in the archive is ignored.
     /// </summary>
-    public void RestoreOnlineBackupArchive(Stream source, bool restoreMail, bool restoreAiAutonomy)
+    public void RestoreOnlineBackupArchive(Stream source, bool restoreMail, bool restoreAiAutonomy, string? ownerUid = null)
     {
         ArgumentNullException.ThrowIfNull(source);
 
@@ -248,8 +356,12 @@ public sealed class DatabaseBackupService
             var wanted = name.EndsWith('/') ? false
                 : IsIn(name, StoreFiles.PendingMailAttachments) || name == StoreFiles.PendingLocalMail ? restoreMail
                 : name == StoreFiles.AiAutonomy && restoreAiAutonomy;
-            if (wanted)
-                Extract(entry, baseDir, name);
+            if (!wanted)
+                continue;
+            // AI settings go to the restoring account's own stores.
+            Extract(entry, baseDir, name == StoreFiles.AiAutonomy && OwnerStoreSet.IsValidOwnerUid(ownerUid)
+                ? $"{OwnerStoreSet.OwnersDirectoryName}/{ownerUid}/{name}"
+                : name);
         }
     }
 

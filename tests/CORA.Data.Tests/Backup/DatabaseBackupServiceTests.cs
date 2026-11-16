@@ -167,4 +167,61 @@ public class DatabaseBackupServiceTests : IDisposable
          restoreTrustedImageSenders: false, restoreBlacklist: false, restoreAiAutonomy: false, restoreAiResultCache: false);
       Assert.False(File.Exists(Path.Combine(Path.GetDirectoryName(_dir)!, "escaped2.txt")));
    }
+
+   // ---- Per-account backups (claude/design-per-account-ownership.md, decision 11) ----
+
+   private MemoryStream PerAccountBackup(string? ownerUid, bool includeOwnerless)
+   {
+      var mail = Path.Combine(_dir, "export-mail.litedb");
+      File.WriteAllText(mail, "mail");
+      var stream = new MemoryStream();
+      _service.CreateBackupArchive(stream, new DatabaseBackupService.BackupContent(ownerUid, includeOwnerless, mail, [], new HashSet<string>()));
+      stream.Position = 0;
+      return stream;
+   }
+
+   [Fact]
+   public void PerAccountBackup_HoldsTheAccountsFiles_AndOwnerlessOnesOnlyWhenAsked()
+   {
+      WriteAllStoreFiles("ownerless");
+      var ownerDir = Path.Combine(_dir, "owners", "uidA1");
+      Directory.CreateDirectory(ownerDir);
+      File.WriteAllText(Path.Combine(ownerDir, "contacts.litedb"), "mine");
+
+      using (var zip = new ZipArchive(PerAccountBackup("uidA1", includeOwnerless: false), ZipArchiveMode.Read))
+      {
+         var names = zip.Entries.Select(e => e.FullName).ToHashSet();
+         Assert.Contains("owner/contacts.litedb", names);
+         Assert.Contains("local_mail.litedb", names);
+         Assert.DoesNotContain("contacts.litedb", names);
+         Assert.DoesNotContain("mailsync.litedb", names);
+         Assert.DoesNotContain("owner/mailsync.litedb", names);
+      }
+      using (var zip = new ZipArchive(PerAccountBackup("uidA1", includeOwnerless: true), ZipArchiveMode.Read))
+      {
+         var names = zip.Entries.Select(e => e.FullName).ToHashSet();
+         Assert.Contains("contacts.litedb", names);
+         Assert.DoesNotContain("mailsync.litedb", names);   // the mail travels as local_mail.litedb only
+      }
+   }
+
+   [Fact]
+   public void PerAccountRestore_PutsTheAccountsFilesWithTheRestoringAccount_AndTheMailAsideToBeAdded()
+   {
+      var ownerDir = Path.Combine(_dir, "owners", "uidA1");
+      Directory.CreateDirectory(ownerDir);
+      File.WriteAllText(Path.Combine(ownerDir, "contacts.litedb"), "mine");
+      File.WriteAllText(Path.Combine(_dir, "contacts.litedb"), "ownerless");
+      using var backup = PerAccountBackup("uidA1", includeOwnerless: true);
+      File.Delete(Path.Combine(ownerDir, "contacts.litedb"));
+      File.Delete(Path.Combine(_dir, "contacts.litedb"));
+
+      _service.RestoreBackupArchive(backup, restoreAccounts: false, restoreTags: false, restoreContacts: true, restoreMailboxes: true,
+         restoreTrustedImageSenders: false, restoreBlacklist: false, restoreAiAutonomy: false, restoreAiResultCache: false, ownerUid: "uidB2");
+
+      Assert.Equal("mine", File.ReadAllText(Path.Combine(_dir, "owners", "uidB2", "contacts.litedb")));   // the restoring account's
+      Assert.Equal("ownerless", File.ReadAllText(Path.Combine(_dir, "contacts.litedb")));                 // stays without an owner
+      Assert.True(File.Exists(Path.Combine(_dir, "local_mail.litedb")));                                  // added at the next start
+      Assert.False(File.Exists(Path.Combine(_dir, "owners", "uidA1", "contacts.litedb")));
+   }
 }

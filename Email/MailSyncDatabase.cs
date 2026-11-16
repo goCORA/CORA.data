@@ -851,18 +851,24 @@ public class MailSyncDatabase : IMailSyncStore, ILocalMailArchive, IFlushableSto
         return File.Exists(candidate) ? candidate : cachePath;
     }
 
+    /// <remarks>
+    /// <paramref name="onlyAccountKeys"/>: when given, goCORA's local-only mail (e.g. Sent copies) is
+    /// exported for those mail accounts only — a backup never carries another goCORA account's mail.
+    /// </remarks>
     public Task<LocalMailExport> ExportLocalMailAsync(
-        string destinationPath, IReadOnlyCollection<string> pop3AccountKeys, CancellationToken cancellationToken = default) =>
+        string destinationPath, IReadOnlyCollection<string> pop3AccountKeys, CancellationToken cancellationToken = default,
+        IReadOnlyCollection<string>? onlyAccountKeys = null) =>
         Task.Run(() =>
         {
             var pop3 = new HashSet<string>(pop3AccountKeys, StringComparer.OrdinalIgnoreCase);
+            var only = onlyAccountKeys is null ? null : new HashSet<string>(onlyAccountKeys, StringComparer.OrdinalIgnoreCase);
             var attachments = new List<string>();
             var messages = 0;
             using var export = EncryptedLiteDbFile.Open(destinationPath);
             var summaries = export.Database.GetCollection<MailSummaryDoc>(SummariesCollection);
             var bodies = export.Database.GetCollection<MessageBodyDoc>(BodiesCollection);
 
-            foreach (var summary in _summaries.FindAll().Where(s => s.IsLocalOnly || pop3.Contains(s.AccountKey)))
+            foreach (var summary in _summaries.FindAll().Where(s => (s.IsLocalOnly && (only is null || only.Contains(s.AccountKey))) || pop3.Contains(s.AccountKey)))
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 summaries.Upsert(summary);

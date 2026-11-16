@@ -93,7 +93,8 @@ public interface ILocalMailArchive
 {
     /// <summary>Writes the local-only mail to a new encrypted file. Only reads the mailbox.</summary>
     Task<LocalMailExport> ExportLocalMailAsync(
-        string destinationPath, IReadOnlyCollection<string> pop3AccountKeys, CancellationToken cancellationToken = default);
+        string destinationPath, IReadOnlyCollection<string> pop3AccountKeys, CancellationToken cancellationToken = default,
+        IReadOnlyCollection<string>? onlyAccountKeys = null);
 
     /// <summary>
     /// Adds what's missing from an exported file, then deletes it and its attachments folder.
