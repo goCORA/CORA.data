@@ -78,6 +78,11 @@ public class AccountCredentialDatabase : ICredentialStore, IFlushableStore, IDis
 
     public void Clear() { }
 
+    /// <summary>Whether this store holds a mailbox with this address (any letter case).</summary>
+    internal bool ContainsAccount(string email) =>
+        !string.IsNullOrWhiteSpace(email)
+        && _accounts.FindAll().Any(a => string.Equals(a.EmailAddress?.Trim(), email.Trim(), StringComparison.OrdinalIgnoreCase));
+
     public string? GetActiveAccountEmail() => _preferences.Get(ActiveAccountPreferenceKey);
 
     public void SetActiveAccountEmail(string? email)

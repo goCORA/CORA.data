@@ -29,6 +29,18 @@ public interface IDataStores : IDisposable
     event Action? SyncableDataChanged;
 
     /// <summary>
+    /// Chooses whose items the stores show (claude/design-per-account-ownership.md).
+    /// Signed in (<paramref name="signedIn"/>): that goCORA account's items plus items without an
+    /// owner; new items belong to the account. Signed out: items without an owner, plus the last
+    /// signed-in account's when <paramref name="showOwnerWhenSignedOut"/>; new items have no owner.
+    /// A null or invalid <paramref name="ownerUid"/> shows only items without an owner.
+    /// </summary>
+    void UseOwner(string? ownerUid, bool signedIn, bool showOwnerWhenSignedOut);
+
+    /// <summary>The goCORA account new items go to, or null when they get no owner.</summary>
+    string? CurrentOwnerUid { get; }
+
+    /// <summary>
     /// Immediately flushes every store to disk without closing anything. Safe to call
     /// any number of times, including while the app keeps running afterward - unlike
     /// <see cref="IDisposable.Dispose"/>, this never tears down the stores. Intended for
@@ -112,21 +124,27 @@ public sealed class SecureDataStores : IDataStores, IDisposable
     // write, not one per contact) rather than waiting for the periodic flush.
     private static readonly TimeSpan ContactsFlushDelay = TimeSpan.FromSeconds(1);
 
-    private readonly TagDatabase _tags;
+    // The mail itself is shared by every owner. Everything else lives in an OwnerStoreSet
+    // (claude/design-per-account-ownership.md): the ownerless set (today's files) plus one set per
+    // goCORA account opened on this device, reached through the router-backed layers below.
     private readonly MailSyncDatabase _mailSync;
-    private readonly AccountCredentialDatabase _accounts;
-    private readonly TrustedImageSenderDatabase _trustedImageSenders;
-    private readonly BlacklistDatabase _blacklist;
-    private readonly AiAutonomyDatabase _aiAutonomy;
-    private readonly ContactDatabase _contacts;
-    private readonly HiddenFolderDatabase _hiddenFolders;
-    private readonly FolderOrderDatabase _folderOrder;
-    private readonly AiResultCacheDatabase _aiResultCache;
-    private readonly SecureMessageKeyDatabase _secureMessageKeys;
-    private readonly RecentRecipientDatabase _recentRecipients;
-    private readonly SyncStateDatabase _syncState;
-    private readonly IFlushableStore[] _flushableStores;
+    private readonly OwnerStoreRouter _router;
+    private readonly Dictionary<string, OwnerStoreSet> _ownerSets = new(StringComparer.Ordinal);
+    private readonly IPreferenceStore _preferences;
     private readonly string _baseDir;
+
+    private readonly ITagStore _tags;
+    private readonly ICredentialStore _accounts;
+    private readonly ITrustedImageSenderStore _trustedImageSenders;
+    private readonly IBlacklistStore _blacklist;
+    private readonly IAiAutonomyStore _aiAutonomy;
+    private readonly IContactStore _contacts;
+    private readonly IHiddenFolderStore _hiddenFolders;
+    private readonly IFolderOrderStore _folderOrder;
+    private readonly IAiResultCacheStore _aiResultCache;
+    private readonly ISecureMessageKeyStore _secureMessageKeys;
+    private readonly IRecentRecipientStore _recentRecipients;
+    private readonly ISyncStateStore _syncState;
     private readonly CancellationTokenSource _autoFlushCts = new();
     private readonly Task _autoFlushTask;
     private readonly Timer _contactsFlushTimer;
@@ -150,29 +168,25 @@ public sealed class SecureDataStores : IDataStores, IDisposable
     public ISyncStateStore SyncState => _syncState;
     public event Action? SyncableDataChanged;
 
-    private SecureDataStores(
-        string baseDir,
-        TagDatabase tags, MailSyncDatabase mailSync, AccountCredentialDatabase accounts,
-        TrustedImageSenderDatabase trustedImageSenders, BlacklistDatabase blacklist,
-        AiAutonomyDatabase aiAutonomy, ContactDatabase contacts, HiddenFolderDatabase hiddenFolders,
-        FolderOrderDatabase folderOrder, AiResultCacheDatabase aiResultCache, SecureMessageKeyDatabase secureMessageKeys,
-        RecentRecipientDatabase recentRecipients, SyncStateDatabase syncState)
+    private SecureDataStores(string baseDir, MailSyncDatabase mailSync, OwnerStoreSet ownerless, IPreferenceStore preferences)
     {
         _baseDir = baseDir;
-        _tags = tags;
         _mailSync = mailSync;
-        _accounts = accounts;
-        _trustedImageSenders = trustedImageSenders;
-        _blacklist = blacklist;
-        _aiAutonomy = aiAutonomy;
-        _contacts = contacts;
-        _hiddenFolders = hiddenFolders;
-        _folderOrder = folderOrder;
-        _aiResultCache = aiResultCache;
-        _secureMessageKeys = secureMessageKeys;
-        _recentRecipients = recentRecipients;
-        _syncState = syncState;
-        _flushableStores = [_tags, _mailSync, _accounts, _trustedImageSenders, _blacklist, _aiAutonomy, _contacts, _hiddenFolders, _folderOrder, _aiResultCache, _secureMessageKeys, _recentRecipients, _syncState];
+        _preferences = preferences;
+        _router = new OwnerStoreRouter(ownerless);
+
+        _tags = new OwnedTagStore(_router);
+        _accounts = new OwnedCredentialStore(_router);
+        _trustedImageSenders = new OwnedTrustedImageSenderStore(_router);
+        _blacklist = new OwnedBlacklistStore(_router);
+        _aiAutonomy = new OwnedAiAutonomyStore(_router);
+        _contacts = new OwnedContactStore(_router);
+        _hiddenFolders = new OwnedHiddenFolderStore(_router);
+        _folderOrder = new OwnedFolderOrderStore(_router);
+        _aiResultCache = new OwnedAiResultCacheStore(_router);
+        _secureMessageKeys = new OwnedSecureMessageKeyStore(_router);
+        _recentRecipients = new OwnedRecentRecipientStore(_router);
+        _syncState = new OwnedSyncStateStore(_router);
 
         // Option B: background safety-net flush, so a mid-session OS kill (which never
         // gives Dispose() a chance to run) loses at most a few seconds of writes instead
@@ -180,14 +194,77 @@ public sealed class SecureDataStores : IDataStores, IDisposable
         _autoFlushTask = RunAutoFlushLoopAsync(_autoFlushCts.Token);
 
         _contactsFlushTimer = new Timer(_ => FlushContacts(), null, Timeout.Infinite, Timeout.Infinite);
-        _contacts.Changed = () =>
-        {
-            ScheduleContactsFlush();
-            SyncableDataChanged?.Invoke();
-        };
-        _tags.Changed = _blacklist.Changed = _trustedImageSenders.Changed = _accounts.Changed = _recentRecipients.Changed = () => SyncableDataChanged?.Invoke();
         _hiddenFolders.Changed += (_, _) => SyncableDataChanged?.Invoke();
         _folderOrder.Changed += (_, _) => SyncableDataChanged?.Invoke();
+
+        WireSet(ownerless);
+        _router.Announce(ownerless);
+    }
+
+    // Changes in the current set are what sync carries; another owner's set is never synced from here.
+    private void WireSet(OwnerStoreSet set)
+    {
+        void Syncable()
+        {
+            if (_router.IsCurrent(set))
+                SyncableDataChanged?.Invoke();
+        }
+        set.Contacts.Changed = () =>
+        {
+            ScheduleContactsFlush();
+            Syncable();
+        };
+        set.Tags.Changed = set.Blacklist.Changed = set.TrustedImageSenders.Changed = set.Accounts.Changed = set.RecentRecipients.Changed = Syncable;
+    }
+
+    // Every store with a file: the shared mail plus each open set. Caller must hold _flushLock.
+    private IEnumerable<IFlushableStore> FlushablesLocked()
+    {
+        yield return _mailSync;
+        foreach (var store in _router.Ownerless.Flushables)
+            yield return store;
+        foreach (var set in _ownerSets.Values)
+        {
+            foreach (var store in set.Flushables)
+                yield return store;
+        }
+    }
+
+    /// <inheritdoc/>
+    public void UseOwner(string? ownerUid, bool signedIn, bool showOwnerWhenSignedOut)
+    {
+        var owner = OwnerStoreSet.IsValidOwnerUid(ownerUid) ? OpenOwnerSet(ownerUid!) : null;
+        if (owner is null)
+            _router.Use(_router.Ownerless, null);
+        else if (signedIn)
+            _router.Use(owner, _router.Ownerless);
+        else
+            _router.Use(_router.Ownerless, showOwnerWhenSignedOut ? owner : null);
+    }
+
+    /// <inheritdoc/>
+    public string? CurrentOwnerUid => _router.Current.OwnerUid;
+
+    /// <summary>
+    /// Opens (creating it empty the first time) a goCORA account's own set of stores in
+    /// <c>owners/&lt;uid&gt;/</c>, or returns it if already open. It is flushed and closed with
+    /// every other store.
+    /// </summary>
+    internal OwnerStoreSet OpenOwnerSet(string ownerUid)
+    {
+        lock (_flushLock)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_ownerSets.TryGetValue(ownerUid, out var open))
+                return open;
+            var set = OwnerStoreSet.OpenOwner(_baseDir, ownerUid, _preferences);
+            if (_flushSuppressed)
+                set.SuppressFlush();
+            WireSet(set);
+            _ownerSets[ownerUid] = set;
+            _router.Announce(set);
+            return set;
+        }
     }
 
     private void ScheduleContactsFlush()
@@ -212,13 +289,16 @@ public sealed class SecureDataStores : IDataStores, IDisposable
             if (_disposed || _flushSuppressed)
                 return;
 
-            try
+            foreach (var set in _ownerSets.Values.Prepend(_router.Ownerless))
             {
-                ((IFlushableStore)_contacts).Flush();
-            }
-            catch
-            {
-                // Still marked dirty, so the periodic flush retries it.
+                try
+                {
+                    ((IFlushableStore)set.Contacts).Flush();
+                }
+                catch
+                {
+                    // Still marked dirty, so the periodic flush retries it.
+                }
             }
         }
     }
@@ -251,7 +331,7 @@ public sealed class SecureDataStores : IDataStores, IDisposable
         if (_flushSuppressed)
             return;
 
-        foreach (var store in _flushableStores)
+        foreach (var store in FlushablesLocked())
         {
             try
             {
@@ -305,6 +385,41 @@ public sealed class SecureDataStores : IDataStores, IDisposable
         {
             foreach (var file in Directory.EnumerateFiles(baseDir, name + "*").ToList())
                 TryDeleteFile(file, failed);
+        }
+
+        // Each goCORA account's own set (owners/<uid>/): same file names, so the same rules.
+        var owners = Path.Combine(baseDir, OwnerStoreSet.OwnersDirectoryName);
+        if (Directory.Exists(owners))
+        {
+            foreach (var ownerDir in Directory.EnumerateDirectories(owners).ToList())
+            {
+                var failuresBefore = failed.Count;
+                foreach (var name in OwnerStoreSet.FileNames)
+                {
+                    foreach (var file in Directory.EnumerateFiles(ownerDir, name + "*").ToList())
+                        TryDeleteFile(file, failed);
+                }
+                if (failed.Count == failuresBefore)
+                {
+                    try
+                    {
+                        Directory.Delete(ownerDir, recursive: true);
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        failed.Add(ownerDir);
+                    }
+                }
+            }
+            try
+            {
+                if (!Directory.EnumerateFileSystemEntries(owners).Any())
+                    Directory.Delete(owners);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                failed.Add(owners);
+            }
         }
 
         var pendingAttachments = Path.Combine(baseDir, StoreFiles.PendingMailAttachments);
@@ -400,55 +515,22 @@ public sealed class SecureDataStores : IDataStores, IDisposable
 
         var baseDir = dataLocation.AppDataDirectory;
 
-        var tags = new TagDatabase(Path.Combine(baseDir, StoreFiles.Tags));
         var mailSync = new MailSyncDatabase(
             Path.Combine(baseDir, StoreFiles.MailSync),
             Path.Combine(baseDir, StoreFiles.AttachmentsDirectory));
-        var accounts = new AccountCredentialDatabase(
-            Path.Combine(baseDir, StoreFiles.Accounts), secureKeyStorage, preferences);
-        var trustedImageSenders = new TrustedImageSenderDatabase(
-            Path.Combine(baseDir, StoreFiles.TrustedImageSenders));
-        var blacklist = new BlacklistDatabase(
-            Path.Combine(baseDir, StoreFiles.Blacklist));
-        var aiAutonomy = new AiAutonomyDatabase(
-            Path.Combine(baseDir, StoreFiles.AiAutonomy));
-        var aiResultCache = new AiResultCacheDatabase(
-            Path.Combine(baseDir, StoreFiles.AiResultCache));
-
-        // Older versions kept contacts.litedb as a plaintext LiteDB file. Convert it before the
-        // encrypted store opens that path (Open() would treat the plaintext file as unreadable
-        // and start empty). A failure here must not block startup, and no data is deleted:
-        // if it fails after moving the plaintext aside, the next launch resumes it; if it fails
-        // earlier, Open() keeps the unreadable file as contacts.litedb.unrecovered-*.bak.
-        var contactsPath = Path.Combine(baseDir, StoreFiles.Contacts);
+        OwnerStoreSet ownerless;
         try
         {
-            LegacyContactMigration.MigrateIfNeeded(contactsPath);
+            ownerless = OwnerStoreSet.OpenOwnerless(baseDir, secureKeyStorage, preferences);
         }
-        catch (Exception ex)
+        catch
         {
-            System.Diagnostics.Debug.WriteLine($"Legacy contacts migration failed; will retry next launch: {ex}");
-        }
-        var contacts = new ContactDatabase(contactsPath);
-
-        // The hidden-folder list used to live in a plaintext preference; move it into the encrypted
-        // store. Best-effort: on failure the preference stays and the import is retried next launch.
-        var hiddenFolders = new HiddenFolderDatabase(Path.Combine(baseDir, StoreFiles.HiddenFolders));
-        try
-        {
-            hiddenFolders.ImportLegacyPreference(preferences);
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"Hidden-folder preference import failed; will retry next launch: {ex}");
+            ((IFlushableStore)mailSync).SuppressFlush();
+            mailSync.Dispose();
+            throw;
         }
 
-        var folderOrder = new FolderOrderDatabase(Path.Combine(baseDir, StoreFiles.FolderOrder));
-        var secureMessageKeys = new SecureMessageKeyDatabase(Path.Combine(baseDir, StoreFiles.SecureMessageKeys));
-        var recentRecipients = new RecentRecipientDatabase(Path.Combine(baseDir, StoreFiles.RecentRecipients));
-        var syncState = new SyncStateDatabase(Path.Combine(baseDir, StoreFiles.SyncState));
-
-        return new SecureDataStores(baseDir, tags, mailSync, accounts, trustedImageSenders, blacklist, aiAutonomy, contacts, hiddenFolders, folderOrder, aiResultCache, secureMessageKeys, recentRecipients, syncState);
+        return new SecureDataStores(baseDir, mailSync, ownerless, preferences);
     }
 
     public void Dispose()
@@ -480,21 +562,21 @@ public sealed class SecureDataStores : IDataStores, IDisposable
         // skips the Flush() that would overwrite the just-restored files on disk.
         if (_flushSuppressed)
         {
-            foreach (var store in _flushableStores)
+            foreach (var store in FlushablesLocked())
                 store.SuppressFlush();
         }
 
         // Best-effort per store: a failed final flush in one (e.g. the atomic file replace
         // still being blocked after its retries) must not stop the others from flushing.
-        foreach (var store in (IDisposable[])[_tags, _mailSync, _accounts, _trustedImageSenders, _blacklist, _aiAutonomy, _contacts, _hiddenFolders, _folderOrder, _aiResultCache, _secureMessageKeys, _recentRecipients, _syncState])
+        try
         {
-            try
-            {
-                store.Dispose();
-            }
-            catch
-            {
-            }
+            _mailSync.Dispose();
         }
+        catch
+        {
+        }
+        _router.Ownerless.Dispose();
+        foreach (var set in _ownerSets.Values)
+            set.Dispose();
     }
 }
