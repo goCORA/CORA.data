@@ -94,6 +94,13 @@ internal static class OwnerMove
 
     private static int MoveAll(LiteDatabase from, LiteDatabase to, string collection) => Move(from, to, collection, _ => true);
 
+    /// <summary>Every collection of one store file into another (e.g. a whole sync state).</summary>
+    public static void MoveWholeStore(LiteDatabase from, LiteDatabase to)
+    {
+        foreach (var name in from.GetCollectionNames().ToList())
+            MoveAll(from, to, name);
+    }
+
     private static int Move(LiteDatabase from, LiteDatabase to, string collection, Func<BsonDocument, bool> match)
     {
         if (!from.CollectionExists(collection))

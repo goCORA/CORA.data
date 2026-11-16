@@ -443,4 +443,39 @@ public class SecureDataStoresTests : IDisposable
       Assert.Single(await stores.Tags.GetTagsAsync());
       Assert.Single(await stores.RecentRecipients.GetAllAsync());
    }
+
+   // ---- Per-account sets, stage 6: what sync sees ----
+
+   [Fact]
+   public async Task Views_SeeOnlyTheAccountsItems_OrOnlyTheOwnerlessOnes()
+   {
+      var stores = await CreateStoresAsync();
+      await stores.Accounts.SaveAccountAsync(new MailAccount { EmailAddress = "old@example.com" });
+      stores.UseOwner("uidA1", signedIn: true, showOwnerWhenSignedOut: false);
+      await stores.Accounts.SaveAccountAsync(new MailAccount { EmailAddress = "new@example.com" });
+
+      Assert.Equal(2, (await stores.Accounts.LoadAllAsync()).Count);
+      Assert.Equal(["new@example.com"], (await stores.OwnedOnly.Accounts.LoadAllAsync()).Select(a => a.EmailAddress));
+      Assert.Equal(["old@example.com"], (await stores.OwnerlessOnly.Accounts.LoadAllAsync()).Select(a => a.EmailAddress));
+
+      stores.UseOwner("uidB2", signedIn: true, showOwnerWhenSignedOut: false);
+      Assert.Empty(await stores.OwnedOnly.Accounts.LoadAllAsync());
+   }
+
+   [Fact]
+   public async Task AdoptOwnerlessSyncState_MovesIt_OnlyToTheAccountItBelongedTo_AndOnlyOnce()
+   {
+      var stores = await CreateStoresAsync();
+      await stores.SyncState.SetOwnerAsync("uidA1");   // signed out: the shared (ownerless) sync state
+      await stores.SyncState.SetValueAsync("passwords", "off");
+
+      Assert.False(await stores.AdoptOwnerlessSyncStateAsync("uidB2", "uidB2"));   // not B's
+      Assert.True(await stores.AdoptOwnerlessSyncStateAsync("uidA1", "uidA1"));
+      Assert.False(await stores.AdoptOwnerlessSyncStateAsync("uidA1", "uidA1"));  // already moved
+
+      Assert.Null(await stores.SyncState.GetOwnerAsync());   // still signed out: the shared one is empty now
+      stores.UseOwner("uidA1", signedIn: true, showOwnerWhenSignedOut: false);
+      Assert.Equal("uidA1", await stores.SyncState.GetOwnerAsync());
+      Assert.Equal("off", await stores.SyncState.GetValueAsync("passwords"));
+   }
 }

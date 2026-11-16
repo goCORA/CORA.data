@@ -9,6 +9,23 @@ namespace CORA.Data.Email;
 /// detail. Implemented by <see cref="SecureDataStores"/>, which owns all encryption,
 /// key management, and file-path concerns internally.
 /// </summary>
+/// <summary>
+/// The owned stores as one view sees them: only the current goCORA account's items, or only the
+/// items without an owner (claude/design-per-account-ownership.md). Cloud sync works on the first.
+/// </summary>
+public interface IStoreView
+{
+    ICredentialStore Accounts { get; }
+    IContactStore Contacts { get; }
+    ITagStore Tags { get; }
+    IBlacklistStore Blacklist { get; }
+    ITrustedImageSenderStore TrustedImageSenders { get; }
+    IRecentRecipientStore RecentRecipients { get; }
+    IHiddenFolderStore HiddenFolders { get; }
+    IFolderOrderStore FolderOrder { get; }
+    ISyncStateStore SyncState { get; }
+}
+
 public interface IDataStores : IDisposable
 {
     ITagStore Tags { get; }
@@ -47,6 +64,20 @@ public interface IDataStores : IDisposable
 
     /// <summary>The goCORA account new items go to, or null when they get no owner.</summary>
     string? CurrentOwnerUid { get; }
+
+    /// <summary>Only the current goCORA account's items (none of the ownerless ones): what its sync carries.</summary>
+    IStoreView OwnedOnly { get; }
+
+    /// <summary>Only the items without an owner.</summary>
+    IStoreView OwnerlessOnly { get; }
+
+    /// <summary>
+    /// Sync state from before per-account data lived in the shared folder, owned by whichever
+    /// account synced there. When <paramref name="ownerUid"/>'s own sync state is still empty and the
+    /// shared one belongs to <paramref name="syncGroup"/> (that account's), it moves to the account,
+    /// so items it no longer owns are taken out of its cloud. Returns whether it moved.
+    /// </summary>
+    Task<bool> AdoptOwnerlessSyncStateAsync(string ownerUid, string syncGroup);
 
     /// <summary>How many mail accounts a goCORA account has on this device (0 for an invalid id).</summary>
     int CountMailAccounts(string? ownerUid);
@@ -166,6 +197,8 @@ public sealed class SecureDataStores : IDataStores, IDisposable
     private readonly ISecureMessageKeyStore _secureMessageKeys;
     private readonly IRecentRecipientStore _recentRecipients;
     private readonly ISyncStateStore _syncState;
+    private readonly StoreView _ownedOnly;
+    private readonly StoreView _ownerlessOnly;
     private readonly CancellationTokenSource _autoFlushCts = new();
     private readonly Task _autoFlushTask;
     private readonly Timer _contactsFlushTimer;
@@ -208,6 +241,8 @@ public sealed class SecureDataStores : IDataStores, IDisposable
         _secureMessageKeys = new OwnedSecureMessageKeyStore(_router);
         _recentRecipients = new OwnedRecentRecipientStore(_router);
         _syncState = new OwnedSyncStateStore(_router);
+        _ownedOnly = new StoreView(OwnerStoreRouter.ViewOf(_router, ownerlessOnly: false));
+        _ownerlessOnly = new StoreView(OwnerStoreRouter.ViewOf(_router, ownerlessOnly: true));
 
         // Option B: background safety-net flush, so a mid-session OS kill (which never
         // gives Dispose() a chance to run) loses at most a few seconds of writes instead
@@ -278,6 +313,30 @@ public sealed class SecureDataStores : IDataStores, IDisposable
 
     /// <inheritdoc/>
     public string? CurrentOwnerUid => _router.Current.OwnerUid;
+
+    /// <inheritdoc/>
+    public IStoreView OwnedOnly => _ownedOnly;
+
+    /// <inheritdoc/>
+    public IStoreView OwnerlessOnly => _ownerlessOnly;
+
+    /// <inheritdoc/>
+    public async Task<bool> AdoptOwnerlessSyncStateAsync(string ownerUid, string syncGroup)
+    {
+        if (string.IsNullOrEmpty(syncGroup))
+            return false;
+        var owner = OpenOwnerSet(ownerUid);
+        if (await owner.SyncState.GetOwnerAsync().ConfigureAwait(false) is not null
+            || await _router.Ownerless.SyncState.GetOwnerAsync().ConfigureAwait(false) != syncGroup)
+            return false;
+        lock (_flushLock)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            OwnerMove.MoveWholeStore(_router.Ownerless.SyncState.Raw, owner.SyncState.Raw);
+            FlushAllLocked();
+        }
+        return true;
+    }
 
     /// <inheritdoc/>
     public int CountMailAccounts(string? ownerUid)

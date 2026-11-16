@@ -19,6 +19,7 @@ namespace CORA.Data.Email;
 internal sealed class OwnerStoreRouter
 {
     private readonly object _gate = new();
+    private readonly Func<(OwnerStoreSet Write, OwnerStoreSet? Other)>? _view;
     private OwnerStoreSet _write;
     private OwnerStoreSet? _other;
 
@@ -28,22 +29,33 @@ internal sealed class OwnerStoreRouter
         _write = ownerless;
     }
 
+    private OwnerStoreRouter(OwnerStoreRouter main, bool ownerlessOnly)
+    {
+        Ownerless = main.Ownerless;
+        _write = main.Ownerless;
+        _view = ownerlessOnly ? () => (main.Ownerless, null) : () => (main.Current, null);
+        main.CurrentChanged += () => CurrentChanged?.Invoke();
+        main.SetOpened += set => SetOpened?.Invoke(set);
+    }
+
+    /// <summary>
+    /// A read-only view of <paramref name="main"/> that sees one set: the current owner's
+    /// (<paramref name="ownerlessOnly"/> false) or the ownerless set (true). Sync uses it so an
+    /// account's cloud only ever holds what that account owns (decision 10).
+    /// </summary>
+    public static OwnerStoreRouter ViewOf(OwnerStoreRouter main, bool ownerlessOnly) => new(main, ownerlessOnly);
+
     /// <summary>Items without an owner: today's files in the app data folder.</summary>
     public OwnerStoreSet Ownerless { get; }
 
     /// <summary>The set new items are written to (sync state too).</summary>
-    public OwnerStoreSet Current
-    {
-        get
-        {
-            lock (_gate)
-                return _write;
-        }
-    }
+    public OwnerStoreSet Current => Snapshot().Write;
 
     /// <summary>The write set, then the other set if any, as one consistent snapshot.</summary>
     public (OwnerStoreSet Write, OwnerStoreSet? Other) Snapshot()
     {
+        if (_view is not null)
+            return _view();
         lock (_gate)
             return (_write, _other);
     }
@@ -68,6 +80,8 @@ internal sealed class OwnerStoreRouter
     public void Use(OwnerStoreSet write, OwnerStoreSet? other)
     {
         ArgumentNullException.ThrowIfNull(write);
+        if (_view is not null)
+            throw new InvalidOperationException("A view follows its main router.");
         if (ReferenceEquals(write, other))
             other = null;
         lock (_gate)
@@ -620,4 +634,31 @@ internal sealed class OwnedSyncStateStore(OwnerStoreRouter router) : ISyncStateS
     public Task<List<SyncHistoryEntry>> GetHistoryAsync(CancellationToken cancellationToken = default) => S.GetHistoryAsync(cancellationToken);
     public Task RemoveHistoryAsync(DateTime? beforeUtc, CancellationToken cancellationToken = default) => S.RemoveHistoryAsync(beforeUtc, cancellationToken);
     public Task ResetAsync(CancellationToken cancellationToken = default) => S.ResetAsync(cancellationToken);
+}
+
+/// <summary>The stores as one view sees them (<see cref="OwnerStoreRouter.ViewOf"/>).</summary>
+internal sealed class StoreView : IStoreView
+{
+    public StoreView(OwnerStoreRouter router)
+    {
+        Accounts = new OwnedCredentialStore(router);
+        Contacts = new OwnedContactStore(router);
+        Tags = new OwnedTagStore(router);
+        Blacklist = new OwnedBlacklistStore(router);
+        TrustedImageSenders = new OwnedTrustedImageSenderStore(router);
+        RecentRecipients = new OwnedRecentRecipientStore(router);
+        HiddenFolders = new OwnedHiddenFolderStore(router);
+        FolderOrder = new OwnedFolderOrderStore(router);
+        SyncState = new OwnedSyncStateStore(router);
+    }
+
+    public ICredentialStore Accounts { get; }
+    public IContactStore Contacts { get; }
+    public ITagStore Tags { get; }
+    public IBlacklistStore Blacklist { get; }
+    public ITrustedImageSenderStore TrustedImageSenders { get; }
+    public IRecentRecipientStore RecentRecipients { get; }
+    public IHiddenFolderStore HiddenFolders { get; }
+    public IFolderOrderStore FolderOrder { get; }
+    public ISyncStateStore SyncState { get; }
 }
