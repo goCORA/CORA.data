@@ -22,6 +22,14 @@ public sealed class OwnerlessItems
         && TrustedSenders == 0 && RecentRecipients == 0 && SecureEmailKeys == 0;
 }
 
+/// <summary>What else a device holds besides one account's items (the Erase screen's caution).</summary>
+/// <param name="OtherAccounts">Other goCORA accounts with at least one item here.</param>
+/// <param name="ItemsWithoutOwner">Items without an owner: mail accounts, contacts, tags, lists and keys.</param>
+public sealed record OtherDataOnDevice(int OtherAccounts, int ItemsWithoutOwner)
+{
+    public bool IsEmpty => OtherAccounts == 0 && ItemsWithoutOwner == 0;
+}
+
 /// <summary>What the user ticked: these move from the ownerless set to the account's set.</summary>
 public sealed class OwnerlessChoice
 {
@@ -91,6 +99,37 @@ internal static class OwnerMove
         Move(from.AiResultCache.Raw, to.AiResultCache.Raw, "AiResultCache", IdStartsWith);
         Move(from.Accounts.Raw, to.Accounts.Raw, "Accounts", IdIs);
     }
+
+    /// <summary>
+    /// Every item of one set into another (an account's items staying on the device without an
+    /// owner): all stores but the sync state, which belongs to the account's cloud and is dropped.
+    /// </summary>
+    public static void MoveEverything(OwnerStoreSet from, OwnerStoreSet to)
+    {
+        foreach (var (source, target) in ((LiteDatabase, LiteDatabase)[])
+        [
+            (from.HiddenFolders.Raw, to.HiddenFolders.Raw), (from.FolderOrder.Raw, to.FolderOrder.Raw),
+            (from.Tags.Raw, to.Tags.Raw), (from.TrustedImageSenders.Raw, to.TrustedImageSenders.Raw),
+            (from.Blacklist.Raw, to.Blacklist.Raw), (from.AiAutonomy.Raw, to.AiAutonomy.Raw),
+            (from.AiResultCache.Raw, to.AiResultCache.Raw), (from.SecureMessageKeys.Raw, to.SecureMessageKeys.Raw),
+            (from.RecentRecipients.Raw, to.RecentRecipients.Raw), (from.Accounts.Raw, to.Accounts.Raw),
+        ])
+            MoveWholeStore(source, target);
+
+        if (from.Contacts.Raw.CollectionExists(LegacyContactMigration.CollectionName))
+        {
+            var ids = from.Contacts.Raw.GetCollection(LegacyContactMigration.CollectionName, BsonAutoId.Int32).FindAll()
+                .Where(d => d["_id"].IsInt32).Select(d => d["_id"].AsInt32).ToHashSet();
+            MoveContacts(from.Contacts.Raw, to.Contacts.Raw, ids);
+            from.Contacts.MarkDirty();
+            to.Contacts.MarkDirty();
+        }
+    }
+
+    /// <summary>How many items a set holds, as one number (mail accounts, contacts and every list).</summary>
+    public static int Count(OwnerlessItems items) =>
+        items.Mailboxes.Count + items.Contacts.Count + items.Tags + items.BlockedSendersAndDomains
+        + items.TrustedSenders + items.RecentRecipients + items.SecureEmailKeys;
 
     private static int MoveAll(LiteDatabase from, LiteDatabase to, string collection) => Move(from, to, collection, _ => true);
 

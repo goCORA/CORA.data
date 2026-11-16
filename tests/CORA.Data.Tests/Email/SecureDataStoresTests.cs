@@ -478,4 +478,63 @@ public class SecureDataStoresTests : IDisposable
       Assert.Equal("uidA1", await stores.SyncState.GetOwnerAsync());
       Assert.Equal("off", await stores.SyncState.GetValueAsync("passwords"));
    }
+
+   // ---- Per-account sets, stage 7b: Delete account / Erase "Only my data" ----
+
+   [Fact]
+   public async Task RemoveOwner_KeepingItsItems_MovesThemToTheOwnerlessSet_WithoutItsSyncState()
+   {
+      var stores = await CreateStoresAsync();
+      await stores.Accounts.SaveAccountAsync(new MailAccount { EmailAddress = "free@example.com" });
+      stores.UseOwner("uidA1", signedIn: true, showOwnerWhenSignedOut: false);
+      await stores.Accounts.SaveAccountAsync(new MailAccount { EmailAddress = "mine@example.com" });
+      stores.HiddenFolders.Hide("mine@example.com", "Spam");
+      await stores.Contacts.SaveAsync(new Contact { FirstName = "Ada", Email = "ada@example.com" });
+      await stores.Blacklist.BlacklistSenderAsync("spam@example.com");
+      await stores.SyncState.SetOwnerAsync("uidA1");
+
+      var problems = await stores.RemoveOwnerAsync("uidA1", keepWithoutOwner: true);
+
+      Assert.Empty(problems);
+      Assert.Null(stores.CurrentOwnerUid);
+      Assert.False(Directory.Exists(Path.Combine(_dir, "owners", "uidA1")));
+      Assert.Equal(["free@example.com", "mine@example.com"], (await stores.Accounts.LoadAllAsync()).Select(a => a.EmailAddress).Order());
+      Assert.True(stores.HiddenFolders.IsHidden("mine@example.com", "Spam"));
+      Assert.Equal(["Ada"], (await stores.Contacts.GetAllAsync()).Select(c => c.FirstName));
+      Assert.True(await stores.Blacklist.IsSenderBlacklistedAsync("spam@example.com"));
+      Assert.Null(await stores.SyncState.GetOwnerAsync());
+   }
+
+   [Fact]
+   public async Task RemoveOwner_Deleting_RemovesOnlyItsItems_AndTheMailNoOtherSetHas()
+   {
+      var stores = await CreateStoresAsync();
+      await stores.Accounts.SaveAccountAsync(new MailAccount { EmailAddress = "both@example.com" });
+      stores.UseOwner("uidB2", signedIn: true, showOwnerWhenSignedOut: false);
+      await stores.Contacts.SaveAsync(new Contact { FirstName = "Bea", Email = "bea@example.com" });
+      stores.UseOwner("uidA1", signedIn: true, showOwnerWhenSignedOut: false);
+      await stores.Accounts.SaveAccountAsync(new MailAccount { EmailAddress = "mine@example.com" });
+      await stores.Contacts.SaveAsync(new Contact { FirstName = "Ada", Email = "ada@example.com", PhotoPath = "ada.jpg" });
+      var photos = Path.Combine(_dir, ContactPhotoFiles.DirectoryName);
+      Directory.CreateDirectory(photos);
+      await File.WriteAllBytesAsync(Path.Combine(photos, "ada.jpg"), [1, 2, 3]);
+      await stores.MailSync.MarkRescuedAsync("mine@example.com", ["one@x"]);
+      await stores.MailSync.MarkRescuedAsync("both@example.com", ["one@x"]);
+
+      var other = await stores.DescribeOtherDataAsync("uidA1");
+      Assert.Equal((1, 1), (other.OtherAccounts, other.ItemsWithoutOwner));   // B's contact; the ownerless mail account
+
+      var problems = await stores.RemoveOwnerAsync("uidA1", keepWithoutOwner: false);
+
+      Assert.Empty(problems);
+      Assert.Null(stores.CurrentOwnerUid);
+      Assert.False(Directory.Exists(Path.Combine(_dir, "owners", "uidA1")));
+      Assert.Equal(["both@example.com"], (await stores.Accounts.LoadAllAsync()).Select(a => a.EmailAddress));
+      Assert.Empty(await stores.MailSync.GetRescuedAsync("mine@example.com", ["one@x"]));
+      Assert.Equal(["one@x"], await stores.MailSync.GetRescuedAsync("both@example.com", ["one@x"]));
+      Assert.False(File.Exists(Path.Combine(photos, "ada.jpg")));
+
+      stores.UseOwner("uidB2", signedIn: true, showOwnerWhenSignedOut: false);
+      Assert.Equal(["Bea"], (await stores.OwnedOnly.Contacts.GetAllAsync()).Select(c => c.FirstName));
+   }
 }

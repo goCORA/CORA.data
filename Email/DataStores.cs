@@ -82,6 +82,9 @@ public interface IDataStores : IDisposable
     /// <summary>How many mail accounts a goCORA account has on this device (0 for an invalid id).</summary>
     int CountMailAccounts(string? ownerUid);
 
+    /// <summary>How many mail accounts all goCORA accounts' sets on this device hold, leaving out <paramref name="exceptOwnerUid"/>'s.</summary>
+    int CountOwnedMailAccounts(string? exceptOwnerUid);
+
     /// <summary>What has no owner on this device: for "Keep these with …" (decision 14).</summary>
     Task<OwnerlessItems> GetOwnerlessItemsAsync();
 
@@ -91,6 +94,23 @@ public interface IDataStores : IDisposable
     /// approvals and AI data) and are saved at once. The mail itself is shared and stays put.
     /// </summary>
     void GiveOwnerlessItems(string ownerUid, OwnerlessChoice choice);
+
+    /// <summary>
+    /// What else this device holds besides <paramref name="ownerUid"/>'s items: other goCORA
+    /// accounts with items here, and items without an owner. For the Erase screen's caution.
+    /// </summary>
+    Task<OtherDataOnDevice> DescribeOtherDataAsync(string ownerUid);
+
+    /// <summary>
+    /// Takes a goCORA account's items off this device (Delete account, Erase "Only my data";
+    /// claude/design-per-account-ownership.md, decision 12). <paramref name="keepWithoutOwner"/>
+    /// true: everything moves to the ownerless set (its sync state is dropped). False: deleted,
+    /// with the cached mail of its mailboxes and its contacts' photo files, unless another set
+    /// on this device still has that mailbox or photo. Other accounts' items and the ownerless
+    /// ones are never touched. Afterwards only the ownerless set is in use. Returns what
+    /// couldn't be removed.
+    /// </summary>
+    Task<IReadOnlyList<string>> RemoveOwnerAsync(string ownerUid, bool keepWithoutOwner);
 
     /// <summary>
     /// Immediately flushes every store to disk without closing anything. Safe to call
@@ -348,6 +368,10 @@ public sealed class SecureDataStores : IDataStores, IDisposable
     }
 
     /// <inheritdoc/>
+    public int CountOwnedMailAccounts(string? exceptOwnerUid) =>
+        OwnerUidsOnDisk().Where(u => u != exceptOwnerUid).Sum(u => CountMailAccounts(u));
+
+    /// <inheritdoc/>
     public Task<OwnerlessItems> GetOwnerlessItemsAsync() => OwnerMove.DescribeAsync(_router.Ownerless);
 
     /// <inheritdoc/>
@@ -362,6 +386,111 @@ public sealed class SecureDataStores : IDataStores, IDisposable
             FlushAllLocked();   // both sets on disk together, as close to one step as the files allow
         }
         _router.Refresh();
+    }
+
+    /// <inheritdoc/>
+    public async Task<OtherDataOnDevice> DescribeOtherDataAsync(string ownerUid)
+    {
+        var others = 0;
+        foreach (var uid in OwnerUidsOnDisk())
+        {
+            if (uid != ownerUid && !(await OwnerMove.DescribeAsync(OpenOwnerSet(uid)).ConfigureAwait(false)).IsEmpty)
+                others++;
+        }
+        var ownerless = await OwnerMove.DescribeAsync(_router.Ownerless).ConfigureAwait(false);
+        return new OtherDataOnDevice(others, OwnerMove.Count(ownerless));
+    }
+
+    /// <inheritdoc/>
+    public async Task<IReadOnlyList<string>> RemoveOwnerAsync(string ownerUid, bool keepWithoutOwner)
+    {
+        if (!OwnerStoreSet.IsValidOwnerUid(ownerUid))
+            throw new ArgumentException("Not a goCORA account id.", nameof(ownerUid));
+        var owner = OpenOwnerSet(ownerUid);
+        var mailboxes = (await owner.Accounts.LoadAllAsync().ConfigureAwait(false)).Select(a => a.EmailAddress).ToList();
+        var photos = (await owner.Contacts.GetAllAsync().ConfigureAwait(false))
+            .Select(c => ContactPhotoFiles.FileNameOf(c.PhotoPath)).Where(n => n.Length > 0).ToHashSet(StringComparer.Ordinal);
+
+        // Nothing reads or writes its set any more, then its items go (to the ownerless set, if kept).
+        _router.Use(_router.Ownerless, null);
+        lock (_flushLock)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (keepWithoutOwner)
+                OwnerMove.MoveEverything(owner, _router.Ownerless);
+            FlushAllLocked();   // with keepWithoutOwner, the ownerless set holds them on disk before the folder goes
+            owner.SuppressFlush();
+            _ownerSets.Remove(ownerUid);
+        }
+        owner.Dispose();
+        _router.Refresh();
+
+        var problems = new List<string>();
+        DeleteOwnerDirectory(owner.Directory, problems);
+        if (keepWithoutOwner)
+            return problems;
+
+        // The mail and photos are shared: only those no other set on this device still has.
+        var others = new List<OwnerStoreSet> { _router.Ownerless };
+        others.AddRange(OwnerUidsOnDisk().Where(u => u != ownerUid).Select(OpenOwnerSet));
+        foreach (var address in mailboxes)
+        {
+            if (others.Any(s => s.Accounts.ContainsAccount(address)))
+                continue;
+            try
+            {
+                await _mailSync.DeleteAccountDataAsync(address).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                problems.Add($"Mail of {address} ({ex.Message})");
+            }
+        }
+        foreach (var set in others)
+        {
+            foreach (var contact in await set.Contacts.GetAllAsync().ConfigureAwait(false))
+                photos.Remove(ContactPhotoFiles.FileNameOf(contact.PhotoPath));
+        }
+        foreach (var name in photos)
+        {
+            var path = Path.Combine(_baseDir, ContactPhotoFiles.DirectoryName, name);
+            if (File.Exists(path))
+                TryDeleteFile(path, problems);
+        }
+        return problems;
+    }
+
+    // goCORA accounts with a folder of their own here (owners/<uid>/).
+    private IEnumerable<string> OwnerUidsOnDisk()
+    {
+        var owners = Path.Combine(_baseDir, OwnerStoreSet.OwnersDirectoryName);
+        if (!Directory.Exists(owners))
+            return [];
+        return Directory.EnumerateDirectories(owners).Select(Path.GetFileName).OfType<string>()
+            .Where(OwnerStoreSet.IsValidOwnerUid).ToList();
+    }
+
+    // One account's folder: its store files (and their .tmp / .bak companions), then the folder.
+    private static void DeleteOwnerDirectory(string ownerDir, List<string> failed)
+    {
+        if (!Directory.Exists(ownerDir))
+            return;
+        var failuresBefore = failed.Count;
+        foreach (var name in OwnerStoreSet.FileNames)
+        {
+            foreach (var file in Directory.EnumerateFiles(ownerDir, name + "*").ToList())
+                TryDeleteFile(file, failed);
+        }
+        if (failed.Count != failuresBefore)
+            return;
+        try
+        {
+            Directory.Delete(ownerDir, recursive: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            failed.Add(ownerDir);
+        }
     }
 
     /// <summary>
@@ -511,25 +640,7 @@ public sealed class SecureDataStores : IDataStores, IDisposable
         if (Directory.Exists(owners))
         {
             foreach (var ownerDir in Directory.EnumerateDirectories(owners).ToList())
-            {
-                var failuresBefore = failed.Count;
-                foreach (var name in OwnerStoreSet.FileNames)
-                {
-                    foreach (var file in Directory.EnumerateFiles(ownerDir, name + "*").ToList())
-                        TryDeleteFile(file, failed);
-                }
-                if (failed.Count == failuresBefore)
-                {
-                    try
-                    {
-                        Directory.Delete(ownerDir, recursive: true);
-                    }
-                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                    {
-                        failed.Add(ownerDir);
-                    }
-                }
-            }
+                DeleteOwnerDirectory(ownerDir, failed);
             try
             {
                 if (!Directory.EnumerateFileSystemEntries(owners).Any())
