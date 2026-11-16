@@ -48,6 +48,9 @@ public interface IDataStores : IDisposable
     /// <summary>The goCORA account new items go to, or null when they get no owner.</summary>
     string? CurrentOwnerUid { get; }
 
+    /// <summary>How many mail accounts a goCORA account has on this device (0 for an invalid id).</summary>
+    int CountMailAccounts(string? ownerUid);
+
     /// <summary>What has no owner on this device: for "Keep these with …" (decision 14).</summary>
     Task<OwnerlessItems> GetOwnerlessItemsAsync();
 
@@ -275,6 +278,15 @@ public sealed class SecureDataStores : IDataStores, IDisposable
 
     /// <inheritdoc/>
     public string? CurrentOwnerUid => _router.Current.OwnerUid;
+
+    /// <inheritdoc/>
+    public int CountMailAccounts(string? ownerUid)
+    {
+        if (!OwnerStoreSet.IsValidOwnerUid(ownerUid))
+            return 0;
+        var raw = OpenOwnerSet(ownerUid!).Accounts.Raw;
+        return raw.CollectionExists("Accounts") ? raw.GetCollection("Accounts").Count() : 0;
+    }
 
     /// <inheritdoc/>
     public Task<OwnerlessItems> GetOwnerlessItemsAsync() => OwnerMove.DescribeAsync(_router.Ownerless);
