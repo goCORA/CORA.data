@@ -56,6 +56,9 @@ public class SecureMessageKeyDatabase : ISecureMessageKeyStore, IFlushableStore,
     }
 
     private readonly EncryptedLiteDbFile _file;
+
+    /// <summary>The open database, for moving items between owners (OwnerMove).</summary>
+    internal LiteDB.LiteDatabase Raw => _file.Database;
     private readonly ILiteCollection<SecureMessageKeyDoc> _keys;
     private readonly ILiteCollection<KeyRequestDoc> _requests;
     private readonly ILiteCollection<KeyShareDoc> _shares;

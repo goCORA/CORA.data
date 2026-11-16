@@ -24,6 +24,9 @@ public class BlacklistDatabase : IBlacklistStore, IFlushableStore, IDisposable
     }
 
     private readonly EncryptedLiteDbFile _file;
+
+    /// <summary>The open database, for moving items between owners (OwnerMove).</summary>
+    internal LiteDB.LiteDatabase Raw => _file.Database;
     private readonly ILiteCollection<BlacklistedSenderDoc> _senders;
     private readonly ILiteCollection<BlacklistedDomainDoc> _domains;
 

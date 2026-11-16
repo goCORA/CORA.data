@@ -22,6 +22,9 @@ public class RecentRecipientDatabase : IRecentRecipientStore, IFlushableStore, I
     private const int MaxEntries = 500;
 
     private readonly EncryptedLiteDbFile _file;
+
+    /// <summary>The open database, for moving items between owners (OwnerMove).</summary>
+    internal LiteDB.LiteDatabase Raw => _file.Database;
     private readonly ILiteCollection<RecipientDoc> _recipients;
 
     /// <summary>

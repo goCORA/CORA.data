@@ -18,6 +18,9 @@ public class AiAutonomyDatabase : IAiAutonomyStore, IFlushableStore, IDisposable
     }
 
     private readonly EncryptedLiteDbFile _file;
+
+    /// <summary>The open database, for moving items between owners (OwnerMove).</summary>
+    internal LiteDB.LiteDatabase Raw => _file.Database;
     private readonly ILiteCollection<AccountAutonomyDoc> _accounts;
 
     public AiAutonomyDatabase(string path)

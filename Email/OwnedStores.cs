@@ -82,6 +82,9 @@ internal sealed class OwnerStoreRouter
 
     public bool IsCurrent(OwnerStoreSet set) => ReferenceEquals(Current, set);
 
+    /// <summary>Items moved between the shown sets: tell listeners (hidden folders, folder order) to read again.</summary>
+    public void Refresh() => CurrentChanged?.Invoke();
+
     public bool IsShown(OwnerStoreSet set)
     {
         var (write, other) = Snapshot();

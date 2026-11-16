@@ -13,6 +13,9 @@ namespace CORA.Data.Contacts;
 public class ContactDatabase : IContactStore, IFlushableStore, IDisposable
 {
     private readonly EncryptedLiteDbFile _file;
+
+    /// <summary>The open database, for moving items between owners (OwnerMove).</summary>
+    internal LiteDB.LiteDatabase Raw => _file.Database;
     private readonly ILiteCollection<Contact> _contacts;
     private int _dirty; // 1 = changes not yet written to disk
 
@@ -72,6 +75,9 @@ public class ContactDatabase : IContactStore, IFlushableStore, IDisposable
     }
 
     void IFlushableStore.SuppressFlush() => _file.SuppressFlush();
+
+    /// <summary>After <see cref="Raw"/> was written directly: make the next flush write the file.</summary>
+    internal void MarkDirty() => Volatile.Write(ref _dirty, 1);
 
     private void MarkChanged()
     {

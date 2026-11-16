@@ -18,6 +18,9 @@ public class AccountCredentialDatabase : ICredentialStore, IFlushableStore, IDis
     private const string ActiveAccountPreferenceKey = "cora.active.account.email";
 
     private readonly EncryptedLiteDbFile _file;
+
+    /// <summary>The open database, for moving items between owners (OwnerMove).</summary>
+    internal LiteDB.LiteDatabase Raw => _file.Database;
     private readonly ILiteCollection<MailAccount> _accounts;
     private readonly ISecureKeyStorage _legacySecureStorage;
     private readonly IPreferenceStore _preferences;

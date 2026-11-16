@@ -171,6 +171,9 @@ public class SyncStateDatabase : ISyncStateStore, IFlushableStore, IDisposable
     private const string OwnerKey = "owner";
 
     private readonly EncryptedLiteDbFile _file;
+
+    /// <summary>The open database, for moving items between owners (OwnerMove).</summary>
+    internal LiteDB.LiteDatabase Raw => _file.Database;
     private readonly ILiteCollection<MetaDoc> _meta;
     private readonly ILiteCollection<KindDoc> _kinds;
     private readonly ILiteCollection<ItemDoc> _items;

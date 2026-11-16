@@ -357,4 +357,90 @@ public class SecureDataStoresTests : IDisposable
       stores.Flush();
       Assert.Equal(saved, File.ReadAllBytes(file));
    }
+
+   // ---- Per-account sets, stage 4: "Keep these with …" ----
+
+   [Fact]
+   public async Task GiveOwnerlessItems_MovesAMailboxWithItsOwnData_AndOtherAccountsNoLongerSeeIt()
+   {
+      var stores = await CreateStoresAsync();
+      await stores.Accounts.SaveAccountAsync(new MailAccount { EmailAddress = "Mine@Example.com" });
+      await stores.Accounts.SaveAccountAsync(new MailAccount { EmailAddress = "left@example.com" });
+      stores.HiddenFolders.Hide("mine@example.com", "Spam");
+      stores.FolderOrder.SetOrder("mine@example.com", ["Inbox", "Sent"]);
+      var tag = await stores.Tags.AddTagAsync("Work", "#123456");
+      await stores.Tags.SetMessageTagAsync("mine@example.com", "INBOX", 7, tag.Id);
+      await stores.TrustedImageSenders.SetMessageAllowedAsync("mine@example.com", "INBOX", 7, true);
+
+      stores.UseOwner("uidA1", signedIn: true, showOwnerWhenSignedOut: false);
+      var items = await stores.GetOwnerlessItemsAsync();
+      Assert.Equal(2, items.Mailboxes.Count);
+      Assert.Equal(1, items.Tags);
+
+      var choice = new OwnerlessChoice();
+      choice.Mailboxes.Add("Mine@Example.com");
+      stores.GiveOwnerlessItems("uidA1", choice);
+
+      var owner = ((SecureDataStores)stores).OpenOwnerSet("uidA1");
+      Assert.Equal(["Mine@Example.com"], (await owner.Accounts.LoadAllAsync()).Select(a => a.EmailAddress));
+      Assert.Equal(["Spam"], owner.HiddenFolders.GetHidden("mine@example.com"));
+      Assert.Equal(["Inbox", "Sent"], owner.FolderOrder.GetOrder("mine@example.com"));
+      Assert.True(await owner.TrustedImageSenders.IsMessageAllowedAsync("mine@example.com", "INBOX", 7));
+      Assert.Equal(tag.Id, (await stores.Tags.GetMessageTagAsync("mine@example.com", "INBOX", 7))?.Id);   // the tag itself stayed ownerless
+      Assert.Equal(["left@example.com"], (await stores.GetOwnerlessItemsAsync()).Mailboxes.Select(a => a.EmailAddress));
+
+      stores.UseOwner("uidB2", signedIn: true, showOwnerWhenSignedOut: false);
+      Assert.Equal(["left@example.com"], (await stores.Accounts.LoadAllAsync()).Select(a => a.EmailAddress));
+      Assert.False(stores.HiddenFolders.IsHidden("mine@example.com", "Spam"));
+   }
+
+   [Fact]
+   public async Task GiveOwnerlessItems_MovesTheTickedContacts_KeepingTheirSyncIds()
+   {
+      var stores = await CreateStoresAsync();
+      var ada = new Contact { FirstName = "Ada", Email = "ada@example.com" };
+      var grace = new Contact { FirstName = "Grace", Email = "grace@example.com" };
+      await stores.Contacts.SaveAsync(ada);
+      await stores.Contacts.SaveAsync(grace);
+
+      var choice = new OwnerlessChoice();
+      choice.ContactIds.Add(ada.Id);
+      stores.GiveOwnerlessItems("uidA1", choice);
+
+      var owner = ((SecureDataStores)stores).OpenOwnerSet("uidA1");
+      var moved = Assert.Single(await owner.Contacts.GetAllAsync());
+      Assert.Equal("Ada", moved.FirstName);
+      Assert.Equal(ada.SyncId, moved.SyncId);
+      Assert.Equal(["Grace"], (await stores.Contacts.GetAllAsync()).Select(c => c.FirstName));   // signed out view: ownerless only
+
+      stores.UseOwner("uidA1", signedIn: true, showOwnerWhenSignedOut: false);
+      Assert.Equal(2, (await stores.Contacts.GetAllAsync()).Count);
+   }
+
+   [Fact]
+   public async Task GiveOwnerlessItems_MovesWholeGroups()
+   {
+      var stores = await CreateStoresAsync();
+      await stores.Tags.AddTagAsync("Work", "#123456");
+      await stores.Blacklist.BlacklistSenderAsync("spam@example.com");
+      await stores.Blacklist.BlacklistDomainAsync("spam.example");
+      await stores.TrustedImageSenders.SetTrustedAsync("friend@example.com", true);
+      await stores.RecentRecipients.RecordSentAsync(["bob@example.com"]);
+
+      var before = await stores.GetOwnerlessItemsAsync();
+      Assert.Equal((1, 2, 1, 1), (before.Tags, before.BlockedSendersAndDomains, before.TrustedSenders, before.RecentRecipients));
+
+      var choice = new OwnerlessChoice { Tags = true, BlockedSendersAndDomains = true, TrustedSenders = true, RecentRecipients = true };
+      stores.GiveOwnerlessItems("uidA1", choice);
+
+      Assert.True((await stores.GetOwnerlessItemsAsync()).IsEmpty);
+      Assert.False(await stores.Blacklist.IsSenderBlacklistedAsync("spam@example.com"));   // signed out: not shown any more
+
+      stores.UseOwner("uidA1", signedIn: true, showOwnerWhenSignedOut: false);
+      Assert.True(await stores.Blacklist.IsSenderBlacklistedAsync("spam@example.com"));
+      Assert.True(await stores.Blacklist.IsDomainBlacklistedAsync("spam.example"));
+      Assert.True(await stores.TrustedImageSenders.IsTrustedAsync("friend@example.com"));
+      Assert.Single(await stores.Tags.GetTagsAsync());
+      Assert.Single(await stores.RecentRecipients.GetAllAsync());
+   }
 }

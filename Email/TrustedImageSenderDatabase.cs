@@ -25,6 +25,9 @@ public class TrustedImageSenderDatabase : ITrustedImageSenderStore, IFlushableSt
     }
 
     private readonly EncryptedLiteDbFile _file;
+
+    /// <summary>The open database, for moving items between owners (OwnerMove).</summary>
+    internal LiteDB.LiteDatabase Raw => _file.Database;
     private readonly ILiteCollection<TrustedSenderDoc> _senders;
     private readonly ILiteCollection<MessageImagesAllowedDoc> _messages;
 

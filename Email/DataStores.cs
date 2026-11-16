@@ -48,6 +48,16 @@ public interface IDataStores : IDisposable
     /// <summary>The goCORA account new items go to, or null when they get no owner.</summary>
     string? CurrentOwnerUid { get; }
 
+    /// <summary>What has no owner on this device: for "Keep these with …" (decision 14).</summary>
+    Task<OwnerlessItems> GetOwnerlessItemsAsync();
+
+    /// <summary>
+    /// Gives the ticked ownerless items to <paramref name="ownerUid"/>: they move into that
+    /// account's set (a mailbox with its hidden folders, folder order, tag assignments, image
+    /// approvals and AI data) and are saved at once. The mail itself is shared and stays put.
+    /// </summary>
+    void GiveOwnerlessItems(string ownerUid, OwnerlessChoice choice);
+
     /// <summary>
     /// Immediately flushes every store to disk without closing anything. Safe to call
     /// any number of times, including while the app keeps running afterward - unlike
@@ -265,6 +275,23 @@ public sealed class SecureDataStores : IDataStores, IDisposable
 
     /// <inheritdoc/>
     public string? CurrentOwnerUid => _router.Current.OwnerUid;
+
+    /// <inheritdoc/>
+    public Task<OwnerlessItems> GetOwnerlessItemsAsync() => OwnerMove.DescribeAsync(_router.Ownerless);
+
+    /// <inheritdoc/>
+    public void GiveOwnerlessItems(string ownerUid, OwnerlessChoice choice)
+    {
+        ArgumentNullException.ThrowIfNull(choice);
+        var owner = OpenOwnerSet(ownerUid);
+        lock (_flushLock)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            OwnerMove.Move(_router.Ownerless, owner, choice);
+            FlushAllLocked();   // both sets on disk together, as close to one step as the files allow
+        }
+        _router.Refresh();
+    }
 
     /// <summary>
     /// Opens (creating it empty the first time) a goCORA account's own set of stores in

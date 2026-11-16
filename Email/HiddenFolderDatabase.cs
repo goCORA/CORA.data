@@ -23,6 +23,9 @@ public class HiddenFolderDatabase : IHiddenFolderStore, IFlushableStore, IDispos
     }
 
     private readonly EncryptedLiteDbFile _file;
+
+    /// <summary>The open database, for moving items between owners (OwnerMove).</summary>
+    internal LiteDB.LiteDatabase Raw => _file.Database;
     private readonly ILiteCollection<HiddenFolderDoc> _folders;
 
     public HiddenFolderDatabase(string path)
