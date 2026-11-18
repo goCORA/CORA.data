@@ -170,6 +170,12 @@ internal sealed class OwnedCredentialStore(OwnerStoreRouter router) : ICredentia
         return router.ForMailbox(account.EmailAddress).Accounts.SaveAccountAsync(account);
     }
 
+    public Task AddAccountAsync(MailAccount account)
+    {
+        ArgumentNullException.ThrowIfNull(account);
+        return router.Current.Accounts.SaveAccountAsync(account);
+    }
+
     public Task DeleteAccountAsync(string email) => router.ForMailbox(email).Accounts.DeleteAccountAsync(email);
 
     public void Clear() { }

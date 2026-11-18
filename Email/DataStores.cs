@@ -82,6 +82,23 @@ public interface IDataStores : IDisposable
     /// <summary>How many mail accounts a goCORA account has on this device (0 for an invalid id).</summary>
     int CountMailAccounts(string? ownerUid);
 
+    /// <summary>
+    /// The copies of a mail account kept on this device by others than the set in use (another goCORA
+    /// account, or without an owner), with their server settings: one address = one mailbox, so adding
+    /// it with a different incoming server is refused (stage 5, option C).
+    /// </summary>
+    Task<IReadOnlyList<MailAccount>> OtherMailAccountCopiesAsync(string address);
+
+    /// <summary>
+    /// Removes the shown copy of a mail account (the signed-in account's own first) with its tag
+    /// assignments and folder order. Its downloaded mail, shared by every copy, is deleted only when
+    /// no copy is left on this device (decision 5). Returns true when the mail was kept.
+    /// </summary>
+    Task<bool> RemoveMailAccountAsync(string address);
+
+    /// <summary>Every mail account address on this device, whoever keeps it, once each (lowercase): the free mailbox limit counts these (decision 13).</summary>
+    IReadOnlySet<string> MailAccountAddressesOnDevice();
+
     /// <summary>How many mail accounts all goCORA accounts' sets on this device hold, leaving out <paramref name="exceptOwnerUid"/>'s.</summary>
     int CountOwnedMailAccounts(string? exceptOwnerUid);
 
@@ -365,6 +382,56 @@ public sealed class SecureDataStores : IDataStores, IDisposable
             return 0;
         var raw = OpenOwnerSet(ownerUid!).Accounts.Raw;
         return raw.CollectionExists("Accounts") ? raw.GetCollection("Accounts").Count() : 0;
+    }
+
+    // Every set on this device: the ownerless one and each account's (opened as needed).
+    private List<OwnerStoreSet> AllSets()
+    {
+        var sets = new List<OwnerStoreSet> { _router.Ownerless };
+        sets.AddRange(OwnerUidsOnDisk().Select(OpenOwnerSet));
+        return sets;
+    }
+
+    /// <inheritdoc/>
+    public IReadOnlySet<string> MailAccountAddressesOnDevice()
+    {
+        var addresses = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var raw in AllSets().Select(s => s.Accounts.Raw).Where(r => r.CollectionExists("Accounts")))
+        {
+            foreach (var doc in raw.GetCollection("Accounts").FindAll())
+            {
+                if (doc["_id"].IsString)
+                    addresses.Add(doc["_id"].AsString.Trim().ToLowerInvariant());
+            }
+        }
+        return addresses;
+    }
+
+    /// <inheritdoc/>
+    public async Task<IReadOnlyList<MailAccount>> OtherMailAccountCopiesAsync(string address)
+    {
+        var current = _router.Current;
+        var copies = new List<MailAccount>();
+        foreach (var set in AllSets().Where(s => !ReferenceEquals(s, current) && s.Accounts.ContainsAccount(address)))
+        {
+            var key = address.Trim();
+            copies.AddRange((await set.Accounts.LoadAllAsync().ConfigureAwait(false))
+                .Where(a => string.Equals(a.EmailAddress.Trim(), key, StringComparison.OrdinalIgnoreCase)));
+        }
+        return copies;
+    }
+
+    /// <inheritdoc/>
+    public async Task<bool> RemoveMailAccountAsync(string address)
+    {
+        // Its own data first, while the copy still decides which set they're in.
+        await _tags.DeleteAccountAssignmentsAsync(address).ConfigureAwait(false);
+        _folderOrder.Clear(address);
+        await _accounts.DeleteAccountAsync(address).ConfigureAwait(false);
+        if (AllSets().Any(s => s.Accounts.ContainsAccount(address)))
+            return true;
+        await _mailSync.DeleteAccountDataAsync(address).ConfigureAwait(false);
+        return false;
     }
 
     /// <inheritdoc/>

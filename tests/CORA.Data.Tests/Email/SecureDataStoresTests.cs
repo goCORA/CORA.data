@@ -537,4 +537,40 @@ public class SecureDataStoresTests : IDisposable
       stores.UseOwner("uidB2", signedIn: true, showOwnerWhenSignedOut: false);
       Assert.Equal(["Bea"], (await stores.OwnedOnly.Contacts.GetAllAsync()).Select(c => c.FirstName));
    }
+
+   // ---- Shared mailboxes, stage 5 ----
+
+   [Fact]
+   public async Task AddingAMailboxAlreadyOnTheDevice_GivesTheAccountItsOwnCopy()
+   {
+      var stores = await CreateStoresAsync();
+      await stores.Accounts.SaveAccountAsync(new MailAccount { EmailAddress = "shared@example.com", DisplayName = "Free", ImapHost = "imap.example.com" });
+      stores.UseOwner("uidA1", signedIn: true, showOwnerWhenSignedOut: false);
+
+      await stores.Accounts.AddAccountAsync(new MailAccount { EmailAddress = "Shared@Example.com", DisplayName = "Mine", ImapHost = "imap.example.com" });
+
+      Assert.Equal(["Mine"], (await stores.OwnedOnly.Accounts.LoadAllAsync()).Select(a => a.DisplayName));
+      Assert.Equal(["Free"], (await stores.OwnerlessOnly.Accounts.LoadAllAsync()).Select(a => a.DisplayName));
+      Assert.Equal(["Mine"], (await stores.Accounts.LoadAllAsync()).Select(a => a.DisplayName));   // shown once: the account's own
+      Assert.Equal(["Free"], (await stores.OtherMailAccountCopiesAsync("shared@example.com")).Select(a => a.DisplayName));
+   }
+
+   [Fact]
+   public async Task RemovingAMailbox_KeepsItsMail_WhileAnotherCopyIsOnTheDevice()
+   {
+      var stores = await CreateStoresAsync();
+      stores.UseOwner("uidB2", signedIn: true, showOwnerWhenSignedOut: false);
+      await stores.Accounts.AddAccountAsync(new MailAccount { EmailAddress = "shared@example.com" });
+      stores.UseOwner("uidA1", signedIn: true, showOwnerWhenSignedOut: false);
+      await stores.Accounts.AddAccountAsync(new MailAccount { EmailAddress = "shared@example.com" });
+      await stores.MailSync.MarkRescuedAsync("shared@example.com", ["one@x"]);
+
+      Assert.True(await stores.RemoveMailAccountAsync("shared@example.com"));   // B still has it
+      Assert.Empty(await stores.OwnedOnly.Accounts.LoadAllAsync());
+      Assert.Equal(["one@x"], await stores.MailSync.GetRescuedAsync("shared@example.com", ["one@x"]));
+
+      stores.UseOwner("uidB2", signedIn: true, showOwnerWhenSignedOut: false);
+      Assert.False(await stores.RemoveMailAccountAsync("shared@example.com"));  // the last copy: its mail goes
+      Assert.Empty(await stores.MailSync.GetRescuedAsync("shared@example.com", ["one@x"]));
+   }
 }
